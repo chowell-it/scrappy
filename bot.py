@@ -57,7 +57,7 @@ URL_RE = re.compile(r"https?://\S+")
 # strict mp4 pick is best for Discord; "best" is the catch-all when a site
 # offers no mp4. ponytail: two rungs cover ~everything; add more only if a real
 # site needs it.
-FORMATS = ["bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b", "best"]
+FORMATS = ["bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]/b", "best"]
 
 # Recently handled URLs, so a reposted link isn't re-downloaded.
 # ponytail: bounded in-memory LRU; resets on restart, which is fine for spam-guard.
