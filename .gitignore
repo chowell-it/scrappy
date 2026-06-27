@@ -1,0 +1,16 @@
+# secrets — never commit your real token
+.env
+cookies.txt
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# scratch / test downloads
+testout/
+t/
+*.mp4
+*.webm
+*.part
