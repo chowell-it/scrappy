@@ -177,6 +177,9 @@ async def on_message(message: discord.Message):
     if not m:
         return
     url = m.group(0)
+    # ponytail: skip GIFs (tenor/giphy/.gif) — not videos worth scraping/re-encoding
+    if re.search(r"\.gif($|\?)|tenor\.com|giphy\.com", url, re.I):
+        return
     if already_seen(url):  # reposted link, don't re-download
         return
 
