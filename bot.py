@@ -59,6 +59,14 @@ URL_RE = re.compile(r"https?://\S+")
 # site needs it.
 FORMATS = ["bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]/b", "best"]
 
+# Drop a Netscape-format cookies.txt next to bot.py to unlock age-restricted /
+# login-walled / "confirm you're not a bot" videos. Gitignored, optional.
+COOKIES = "cookies.txt"
+
+
+def cookie_opt() -> dict:
+    return {"cookiefile": COOKIES} if os.path.exists(COOKIES) else {}
+
 # Recently handled URLs, so a reposted link isn't re-downloaded.
 # ponytail: bounded in-memory LRU; resets on restart, which is fine for spam-guard.
 _seen: "OrderedDict[str, None]" = OrderedDict()
@@ -92,7 +100,7 @@ def ffprobe_duration(path: str) -> float:
 def probe(url: str) -> dict:
     """Validate the link is a real video without downloading. Raises
     DownloadError if it isn't (used to stay silent on non-video links)."""
-    with yt_dlp.YoutubeDL({"noplaylist": True, "quiet": True}) as ydl:
+    with yt_dlp.YoutubeDL({"noplaylist": True, "quiet": True, **cookie_opt()}) as ydl:
         return ydl.extract_info(url, download=False)
 
 
@@ -106,6 +114,7 @@ def download(url: str, workdir: str) -> str:
             "noplaylist": True,
             "quiet": True,
             "merge_output_format": "mp4",
+            **cookie_opt(),
         }
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -171,10 +180,19 @@ async def on_message(message: discord.Message):
     if already_seen(url):  # reposted link, don't re-download
         return
 
-    # Check the link first; stay silent if it isn't a video we can fetch.
+    # Check the link first. Truly unsupported links stay silent; a video that
+    # exists but is blocked (age/login/private/bot-check) gets an explanation.
     try:
         info = await asyncio.to_thread(probe, url)
-    except yt_dlp.utils.DownloadError:
+    except yt_dlp.utils.DownloadError as e:
+        err = str(e).lower()
+        if "unsupported url" in err or "is not a valid url" in err:
+            return  # not a video link, ignore quietly
+        await message.reply(
+            "❌ Can't fetch that — looks age-restricted, private, or it wants "
+            "a login. Add a `cookies.txt` on the host to access these.",
+            mention_author=False,
+        )
         return
     title = (info.get("title") or "video")[:80]
 

@@ -94,13 +94,33 @@ journalctl -u scrappy -f    # view logs
 
 Update later: `git pull && sudo systemctl restart scrappy`.
 
+## Cookies (age-restricted / login-walled / "confirm you're not a bot")
+
+YouTube age-gated videos, private/login-walled Instagram & TikTok posts, and
+the "confirm you're not a bot" wall (common on datacenter/VPS IPs) all need a
+logged-in session. Drop a `cookies.txt` next to `bot.py` and yt-dlp uses it
+automatically — no code change. Without it, the bot replies explaining the link
+is blocked.
+
+1. On your PC, install the browser extension **"Get cookies.txt LOCALLY"**
+   (Chrome/Firefox).
+2. Log into the site (**use a throwaway account** — the file grants full session
+   access to it).
+3. On the site, click the extension → **Export** → save `cookies.txt`.
+4. Put it in the bot folder on the host (e.g. GCP browser SSH → ⚙ → Upload):
+   ```bash
+   mv ~/cookies.txt ~/scripts/scrappy/cookies.txt
+   sudo systemctl restart scrappy
+   ```
+
+`cookies.txt` is **gitignored** — it's a credential, never commit it. Cookies
+expire every few weeks; re-export when videos start failing again. One file
+covers YouTube, Instagram, and TikTok.
+
 ## Notes
 
 - Free-tier servers cap uploads at **10 MB** — set `DISCORD_MAX_MB` to match
   your boost tier (L2 = 50, L3 = 100). Long 4K videos may not fit even
   re-encoded; the bot replies saying so.
-- Instagram/TikTok sometimes need login. yt-dlp supports
-  `--cookies-from-browser`; if you hit auth walls, export cookies and add a
-  `cookiefile` to the yt-dlp `opts` in [bot.py](bot.py).
 - yt-dlp breaks when sites change. `AUTO_UPDATE=1` (default) refreshes it on
   each startup; otherwise `pip install -U yt-dlp` periodically.
