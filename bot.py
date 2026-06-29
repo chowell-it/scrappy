@@ -105,8 +105,8 @@ intents.message_content = True
 client = discord.Client(intents=intents)
 
 
-def _run(cmd: list[str]) -> str:
-    p = subprocess.run(cmd, capture_output=True, text=True)
+def _run(cmd: list[str], timeout: int = 600) -> str:
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if p.returncode != 0:
         # surface ffmpeg/ffprobe's actual complaint, not a bare exit code
         tail = " / ".join((p.stderr or "").strip().splitlines()[-6:])
@@ -123,7 +123,8 @@ def ffprobe_duration(path: str) -> float:
 def probe(url: str) -> dict:
     """Validate the link is a real video without downloading. Raises
     DownloadError if it isn't (used to stay silent on non-video links)."""
-    with yt_dlp.YoutubeDL({"noplaylist": True, "quiet": True, **cookie_opt()}) as ydl:
+    with yt_dlp.YoutubeDL({"noplaylist": True, "quiet": True,
+                           "socket_timeout": 30, **cookie_opt()}) as ydl:
         return ydl.extract_info(url, download=False)
 
 
@@ -136,6 +137,7 @@ def download(url: str, workdir: str) -> str:
             "outtmpl": os.path.join(workdir, "raw.%(ext)s"),
             "noplaylist": True,
             "quiet": True,
+            "socket_timeout": 30,  # fail a stalled connection instead of hanging
             "merge_output_format": "mp4",
             **cookie_opt(),
         }
@@ -166,7 +168,7 @@ def shrink(src: str, dst: str, scale: float = 1.0) -> None:
         # sites like Facebook embed as a still video stream (encoding the
         # thumbnail yields frame=0 -> "Conversion failed"). audio optional.
         "-map", "0:V:0", "-map", "0:a:0?",
-        "-c:v", "libx264", "-preset", "veryfast",
+        "-c:v", "libx264", "-preset", "superfast",
         "-b:v", f"{video_kbps}k", "-maxrate", f"{video_kbps}k", "-bufsize", f"{video_kbps*2}k",
         # downscale to 720p max; keeps aspect, never upscales
         # downscale to 720p max (keeps aspect, never upscales), then force both
@@ -241,12 +243,17 @@ async def on_message(message: discord.Message):
     status = await message.reply(f"⏳ Downloading **{title}**…", mention_author=False)
     workdir = tempfile.mkdtemp(prefix="scrappy_")
     try:
+        t = time.time()
         raw = await asyncio.to_thread(download, url, workdir)
-        if os.path.getsize(raw) <= TARGET_BYTES:
+        sz = os.path.getsize(raw)
+        print(f"[timing] download {time.time()-t:.1f}s, raw {sz/1e6:.1f}MB ({title})")
+        if sz <= TARGET_BYTES:
             final: str | None = raw
         else:
             await status.edit(content=f"🔧 Processing **{title}** (shrinking to fit)…")
+            t = time.time()
             final = await asyncio.to_thread(process, raw, workdir)
+            print(f"[timing] encode {time.time()-t:.1f}s ({title})")
 
         if final:
             # editing the status message with the file shows the "uploaded" result
