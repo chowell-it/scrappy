@@ -169,7 +169,10 @@ def shrink(src: str, dst: str, scale: float = 1.0) -> None:
         "-c:v", "libx264", "-preset", "veryfast",
         "-b:v", f"{video_kbps}k", "-maxrate", f"{video_kbps}k", "-bufsize", f"{video_kbps*2}k",
         # downscale to 720p max; keeps aspect, never upscales
-        "-vf", "scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease",
+        # downscale to 720p max (keeps aspect, never upscales), then force both
+        # dims even — libx264 rejects odd width/height (e.g. 405x720)
+        "-vf", "scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease,"
+               "scale=trunc(iw/2)*2:trunc(ih/2)*2",
         "-c:a", "aac", "-b:a", f"{audio_kbps}k",
         "-movflags", "+faststart",
         dst,
