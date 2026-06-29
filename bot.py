@@ -162,9 +162,10 @@ def shrink(src: str, dst: str, scale: float = 1.0) -> None:
     video_kbps = max(150, int(base * scale))
     _run([
         "ffmpeg", "-y", "-i", src,
-        # take 1st video + (optional) 1st audio; ignores cover-art/data streams
-        # that some sites (Facebook) attach and that crash a blind re-encode
-        "-map", "0:v:0", "-map", "0:a:0?",
+        # 0:V (capital) = 1st real video, skipping attached thumbnails that
+        # sites like Facebook embed as a still video stream (encoding the
+        # thumbnail yields frame=0 -> "Conversion failed"). audio optional.
+        "-map", "0:V:0", "-map", "0:a:0?",
         "-c:v", "libx264", "-preset", "veryfast",
         "-b:v", f"{video_kbps}k", "-maxrate", f"{video_kbps}k", "-bufsize", f"{video_kbps*2}k",
         # downscale to 720p max; keeps aspect, never upscales
