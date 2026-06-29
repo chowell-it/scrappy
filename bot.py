@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 from collections import OrderedDict
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import discord
 
@@ -53,6 +54,23 @@ if AUTO_UPDATE and (not os.path.exists(_UPDATE_MARKER)
 import yt_dlp  # noqa: E402  (imported after the optional self-update above)
 
 URL_RE = re.compile(r"https?://\S+")
+
+# Tracking/telemetry query params to strip from shared links before we touch them.
+# ponytail: a known-junk denylist covers real-world shares; widen only if a real
+# param sneaks through. Path-based IDs (facebook /share/r/…, youtu.be/…) are untouched.
+_TRACK_RE = re.compile(r"^(utm_|ga_|_hs|mc_|pk_|hsa_|matomo_)", re.I)
+_TRACK_KEYS = {
+    "fbclid", "gclid", "dclid", "msclkid", "yclid", "twclid",
+    "igshid", "igsh", "si", "spm", "scwid", "mibextid",
+    "ref", "ref_src", "ref_url", "feature", "share_id",
+}
+
+
+def strip_tracking(url: str) -> str:
+    parts = urlsplit(url)
+    kept = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+            if k.lower() not in _TRACK_KEYS and not _TRACK_RE.match(k)]
+    return urlunsplit(parts._replace(query=urlencode(kept)))
 # Format selectors tried in order until one yields a downloadable file. The
 # strict mp4 pick is best for Discord; "best" is the catch-all when a site
 # offers no mp4. ponytail: two rungs cover ~everything; add more only if a real
@@ -88,7 +106,12 @@ client = discord.Client(intents=intents)
 
 
 def _run(cmd: list[str]) -> str:
-    return subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    if p.returncode != 0:
+        # surface ffmpeg/ffprobe's actual complaint, not a bare exit code
+        tail = " / ".join((p.stderr or "").strip().splitlines()[-3:])
+        raise RuntimeError(f"{cmd[0]} exit {p.returncode}: {tail or '(no stderr)'}")
+    return p.stdout
 
 
 def ffprobe_duration(path: str) -> float:
@@ -139,6 +162,9 @@ def shrink(src: str, dst: str, scale: float = 1.0) -> None:
     video_kbps = max(150, int(base * scale))
     _run([
         "ffmpeg", "-y", "-i", src,
+        # take 1st video + (optional) 1st audio; ignores cover-art/data streams
+        # that some sites (Facebook) attach and that crash a blind re-encode
+        "-map", "0:v:0", "-map", "0:a:0?",
         "-c:v", "libx264", "-preset", "veryfast",
         "-b:v", f"{video_kbps}k", "-maxrate", f"{video_kbps}k", "-bufsize", f"{video_kbps*2}k",
         # downscale to 720p max; keeps aspect, never upscales
@@ -176,7 +202,7 @@ async def on_message(message: discord.Message):
     m = URL_RE.search(message.content)
     if not m:
         return
-    url = m.group(0)
+    url = strip_tracking(m.group(0))
     # ponytail: skip GIFs (tenor/giphy/.gif) — not videos worth scraping/re-encoding
     if re.search(r"\.gif($|\?)|tenor\.com|giphy\.com", url, re.I):
         return
