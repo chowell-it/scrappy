@@ -109,7 +109,7 @@ def _run(cmd: list[str]) -> str:
     p = subprocess.run(cmd, capture_output=True, text=True)
     if p.returncode != 0:
         # surface ffmpeg/ffprobe's actual complaint, not a bare exit code
-        tail = " / ".join((p.stderr or "").strip().splitlines()[-3:])
+        tail = " / ".join((p.stderr or "").strip().splitlines()[-6:])
         raise RuntimeError(f"{cmd[0]} exit {p.returncode}: {tail or '(no stderr)'}")
     return p.stdout
 
@@ -161,7 +161,7 @@ def shrink(src: str, dst: str, scale: float = 1.0) -> None:
     base = int((TARGET_BYTES * 8 / duration) / 1000) - audio_kbps
     video_kbps = max(150, int(base * scale))
     _run([
-        "ffmpeg", "-y", "-i", src,
+        "ffmpeg", "-y", "-hide_banner", "-nostats", "-loglevel", "error", "-i", src,
         # 0:V (capital) = 1st real video, skipping attached thumbnails that
         # sites like Facebook embed as a still video stream (encoding the
         # thumbnail yields frame=0 -> "Conversion failed"). audio optional.
