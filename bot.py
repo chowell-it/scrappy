@@ -252,7 +252,9 @@ async def on_message(message: discord.Message):
         )
         return
 
-    status = await message.reply(f"⏳ Downloading **{title}**…", mention_author=False)
+    # plain send, not a reply — original message gets deleted on success and a
+    # reply would leave a broken "original message deleted" reference
+    status = await message.channel.send(f"⏳ Downloading **{title}**…")
     workdir = tempfile.mkdtemp(prefix="scrappy_")
     try:
         t = time.time()
@@ -269,7 +271,8 @@ async def on_message(message: discord.Message):
 
         if final:
             # editing the status message with the file shows the "uploaded" result
-            await status.edit(content=f"📎 Sent from {message.author.mention}",
+            # <url> keeps the raw link copy-pasteable but suppresses the embed
+            await status.edit(content=f"📎 Sent from {message.author.mention}\n<{url}>",
                               attachments=[discord.File(final)])
             # ponytail: needs Manage Messages perm; ignore if we can't delete
             try:
