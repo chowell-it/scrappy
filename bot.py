@@ -271,8 +271,8 @@ async def on_message(message: discord.Message):
 
         if final:
             # editing the status message with the file shows the "uploaded" result
-            # <url> keeps the raw link copy-pasteable but suppresses the embed
-            await status.edit(content=f"📎 Sent from {message.author.mention}\n<{url}>",
+            # -# = small grey subtext; backticks make the link plain/copyable, not a hyperlink
+            await status.edit(content=f"-# 📎 Sent from {message.author.mention} `{url}`",
                               attachments=[discord.File(final)])
             # ponytail: needs Manage Messages perm; ignore if we can't delete
             try:
