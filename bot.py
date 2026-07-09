@@ -269,7 +269,13 @@ async def on_message(message: discord.Message):
 
         if final:
             # editing the status message with the file shows the "uploaded" result
-            await status.edit(content="", attachments=[discord.File(final)])
+            await status.edit(content=f"📎 Sent from {message.author.mention}",
+                              attachments=[discord.File(final)])
+            # ponytail: needs Manage Messages perm; ignore if we can't delete
+            try:
+                await message.delete()
+            except discord.Forbidden:
+                pass
         else:
             await status.edit(content=f"❌ Couldn't get **{title}** under {MAX_MB:g} MB.")
     except yt_dlp.utils.DownloadError:
