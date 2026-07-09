@@ -123,9 +123,18 @@ def ffprobe_duration(path: str) -> float:
 def probe(url: str) -> dict:
     """Validate the link is a real video without downloading. Raises
     DownloadError if it isn't (used to stay silent on non-video links)."""
-    with yt_dlp.YoutubeDL({"noplaylist": True, "quiet": True,
-                           "socket_timeout": 30, **cookie_opt()}) as ydl:
-        return ydl.extract_info(url, download=False)
+    with yt_dlp.YoutubeDL({"noplaylist": True, "quiet": True, "socket_timeout": 30,
+                           # -generic: don't scrape random webpages for og:video etc.
+                           # Only sites with a real extractor pass; the rest raise
+                           # "Unsupported URL" and stay silent.
+                           "allowed_extractors": ["default", "-generic"],
+                           **cookie_opt()}) as ydl:
+        info = ydl.extract_info(url, download=False)
+    # belt-and-suspenders: a real video has a duration or a video-bearing format
+    if not (info.get("duration") or any(
+            f.get("vcodec") not in (None, "none") for f in info.get("formats", []))):
+        raise yt_dlp.utils.DownloadError("Unsupported URL: no video content")
+    return info
 
 
 def download(url: str, workdir: str) -> str:
@@ -221,13 +230,16 @@ async def on_message(message: discord.Message):
         info = await asyncio.to_thread(probe, url)
     except yt_dlp.utils.DownloadError as e:
         err = str(e).lower()
-        if "unsupported url" in err or "is not a valid url" in err:
-            return  # not a video link, ignore quietly
-        await message.reply(
-            "❌ Can't fetch that — looks age-restricted, private, or it wants "
-            "a login. Add a `cookies.txt` on the host to access these.",
-            mention_author=False,
-        )
+        # Only speak up when the link IS a video but is auth-walled. Everything
+        # else (plain webpages, dead links, scrape failures) stays silent.
+        auth = ("sign in", "log in", "login", "private", "age-restrict",
+                "confirm your age", "not a bot", "members-only", "403")
+        if any(a in err for a in auth):
+            await message.reply(
+                "❌ Can't fetch that — looks age-restricted, private, or it wants "
+                "a login. Add a `cookies.txt` on the host to access these.",
+                mention_author=False,
+            )
         return
     title = (info.get("title") or "video")[:80]
 
