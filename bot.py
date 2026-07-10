@@ -100,6 +100,13 @@ def already_seen(url: str) -> bool:
         _seen.popitem(last=False)
     return False
 
+# Matches yt-dlp's "No suitable extractor found for URL {url}" message. Used to
+# tell a shortlink whose redirect target has no extractor (e.g. a TikTok
+# vm.tiktok.com/t/... link landing on a photo/slideshow post, which yt-dlp
+# can't turn into a video) apart from a plain non-video webpage (no redirect,
+# same URL, stays silent).
+_NO_EXTRACTOR_RE = re.compile(r"no suitable extractor found for url (\S+)")
+
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
@@ -234,10 +241,20 @@ async def on_message(message: discord.Message):
         # else (plain webpages, dead links, scrape failures) stays silent.
         auth = ("sign in", "log in", "login", "private", "age-restrict",
                 "confirm your age", "not a bot", "members-only", "403")
+        no_extractor = _NO_EXTRACTOR_RE.search(err)
         if any(a in err for a in auth):
             await message.reply(
                 "❌ Can't fetch that — looks age-restricted, private, or it wants "
                 "a login. Add a `cookies.txt` on the host to access these.",
+                mention_author=False,
+            )
+        elif no_extractor and no_extractor.group(1).rstrip(".,)") != url.lower():
+            # The shortlink's redirect resolved fine, but the landing page (e.g. a
+            # TikTok photo/slideshow post) isn't something yt-dlp can pull a video
+            # from — say so instead of looking like the redirect itself failed.
+            await message.reply(
+                "❌ That link redirects to a page with no downloadable video "
+                "(likely a photo/slideshow post, not a real video).",
                 mention_author=False,
             )
         return
