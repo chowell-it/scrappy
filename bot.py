@@ -171,6 +171,44 @@ def download(url: str, workdir: str) -> str:
     raise last_err  # type: ignore[misc]
 
 
+# Hosts that are audio-first — auto-download as mp3 unless a tag says otherwise.
+_AUDIO_HOSTS = re.compile(r"soundcloud\.com|bandcamp\.com|music\.youtube\.com", re.I)
+# Explicit override in the message: $audio / $video / !audio / !video (tag wins).
+_MODE_TAG = re.compile(r"[!$](audio|video)\b", re.I)
+
+
+def wants_audio(content: str, url: str) -> bool:
+    tag = _MODE_TAG.search(content)
+    if tag:
+        return tag.group(1).lower() == "audio"
+    return bool(_AUDIO_HOSTS.search(url))
+
+
+def download_audio(url: str, workdir: str) -> str:
+    """Grab bestaudio as mp3 with embedded metadata + cover art."""
+    opts = {
+        "format": "bestaudio/best",
+        "outtmpl": os.path.join(workdir, "audio.%(ext)s"),
+        "noplaylist": True,
+        "quiet": True,
+        "socket_timeout": 30,
+        "writethumbnail": True,
+        "postprocessors": [
+            {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"},
+            {"key": "FFmpegMetadata"},
+            {"key": "EmbedThumbnail"},
+        ],
+        **cookie_opt(),
+    }
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        ydl.extract_info(url, download=True)
+    mp3 = next((os.path.join(workdir, f) for f in os.listdir(workdir)
+                if f.lower().endswith(".mp3")), None)
+    if not mp3:
+        raise RuntimeError("audio extraction produced no mp3")
+    return mp3
+
+
 def shrink(src: str, dst: str, scale: float = 1.0) -> None:
     """Re-encode src toward TARGET_BYTES. scale<1 forces a lower bitrate."""
     duration = ffprobe_duration(src) or 1
@@ -275,16 +313,24 @@ async def on_message(message: discord.Message):
     workdir = tempfile.mkdtemp(prefix="scrappy_")
     try:
         t = time.time()
-        raw = await asyncio.to_thread(download, url, workdir)
-        sz = os.path.getsize(raw)
-        print(f"[timing] download {time.time()-t:.1f}s, raw {sz/1e6:.1f}MB ({title})")
-        if sz <= TARGET_BYTES:
-            final: str | None = raw
+        final: str | None
+        if wants_audio(message.content, url):
+            raw = await asyncio.to_thread(download_audio, url, workdir)
+            sz = os.path.getsize(raw)
+            print(f"[timing] audio {time.time()-t:.1f}s, {sz/1e6:.1f}MB ({title})")
+            # mp3 can't be shrunk by the video re-encoder; fits or it doesn't
+            final = raw if sz <= TARGET_BYTES else None
         else:
-            await status.edit(content=f"🔧 Processing **{title}** (shrinking to fit)…")
-            t = time.time()
-            final = await asyncio.to_thread(process, raw, workdir)
-            print(f"[timing] encode {time.time()-t:.1f}s ({title})")
+            raw = await asyncio.to_thread(download, url, workdir)
+            sz = os.path.getsize(raw)
+            print(f"[timing] download {time.time()-t:.1f}s, raw {sz/1e6:.1f}MB ({title})")
+            if sz <= TARGET_BYTES:
+                final = raw
+            else:
+                await status.edit(content=f"🔧 Processing **{title}** (shrinking to fit)…")
+                t = time.time()
+                final = await asyncio.to_thread(process, raw, workdir)
+                print(f"[timing] encode {time.time()-t:.1f}s ({title})")
 
         if final:
             # editing the status message with the file shows the "uploaded" result
