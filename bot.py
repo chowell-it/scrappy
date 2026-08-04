@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 from collections import OrderedDict
+import urllib.request
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import discord
@@ -209,6 +210,24 @@ def download_audio(url: str, workdir: str) -> str:
     return mp3
 
 
+# GIF distribution services — explicitly blocked (they embed natively; no reupload).
+_GIF_SERVICES = re.compile(r"tenor\.com|giphy\.com|klipy\.", re.I)
+
+
+def is_direct_gif(url: str) -> bool:
+    """True for a direct .gif file link (e.g. a Twitter/social CDN), not a gif-service page."""
+    return urlsplit(url).path.lower().endswith(".gif")
+
+
+def fetch_gif(url: str, workdir: str) -> str:
+    """Download the raw .gif so we can reupload it into the chat as an animated GIF."""
+    dst = os.path.join(workdir, "out.gif")
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=30) as r, open(dst, "wb") as f:
+        shutil.copyfileobj(r, f)
+    return dst
+
+
 def shrink(src: str, dst: str, scale: float = 1.0) -> None:
     """Re-encode src toward TARGET_BYTES. scale<1 forces a lower bitrate."""
     duration = ffprobe_duration(src) or 1
@@ -263,49 +282,53 @@ async def on_message(message: discord.Message):
     if not m:
         return
     url = strip_tracking(m.group(0))
-    # ponytail: skip GIFs (tenor/giphy/.gif) — not videos worth scraping/re-encoding
-    if re.search(r"\.gif($|\?)|tenor\.com|giphy\.com", url, re.I):
+    # GIF-hosting services (Tenor/Giphy/Klipy) embed natively in Discord — leave
+    # them. A *direct* .gif file we transcode to mp4 further down.
+    if _GIF_SERVICES.search(url):
         return
     if already_seen(url):  # reposted link, don't re-download
         return
 
-    # Check the link first. Truly unsupported links stay silent; a video that
-    # exists but is blocked (age/login/private/bot-check) gets an explanation.
-    try:
-        info = await asyncio.to_thread(probe, url)
-    except yt_dlp.utils.DownloadError as e:
-        err = str(e).lower()
-        # Only speak up when the link IS a video but is auth-walled. Everything
-        # else (plain webpages, dead links, scrape failures) stays silent.
-        auth = ("sign in", "log in", "login", "private", "age-restrict",
-                "confirm your age", "not a bot", "members-only", "403")
-        no_extractor = _NO_EXTRACTOR_RE.search(err)
-        if any(a in err for a in auth):
-            await message.reply(
-                "❌ Can't fetch that — looks age-restricted, private, or it wants "
-                "a login. Add a `cookies.txt` on the host to access these.",
-                mention_author=False,
-            )
-        elif no_extractor and no_extractor.group(1).rstrip(".,)") != url.lower():
-            # The shortlink's redirect resolved fine, but the landing page (e.g. a
-            # TikTok photo/slideshow post) isn't something yt-dlp can pull a video
-            # from — say so instead of looking like the redirect itself failed.
-            await message.reply(
-                "❌ That link redirects to a page with no downloadable video "
-                "(likely a photo/slideshow post, not a real video).",
-                mention_author=False,
-            )
-        return
-    title = (info.get("title") or "video")[:80]
+    is_gif = is_direct_gif(url)
+    title = "gif"
+    if not is_gif:
+        # Check the link first. Truly unsupported links stay silent; a video that
+        # exists but is blocked (age/login/private/bot-check) gets an explanation.
+        try:
+            info = await asyncio.to_thread(probe, url)
+        except yt_dlp.utils.DownloadError as e:
+            err = str(e).lower()
+            # Only speak up when the link IS a video but is auth-walled. Everything
+            # else (plain webpages, dead links, scrape failures) stays silent.
+            auth = ("sign in", "log in", "login", "private", "age-restrict",
+                    "confirm your age", "not a bot", "members-only", "403")
+            no_extractor = _NO_EXTRACTOR_RE.search(err)
+            if any(a in err for a in auth):
+                await message.reply(
+                    "❌ Can't fetch that — looks age-restricted, private, or it wants "
+                    "a login. Add a `cookies.txt` on the host to access these.",
+                    mention_author=False,
+                )
+            elif no_extractor and no_extractor.group(1).rstrip(".,)") != url.lower():
+                # The shortlink's redirect resolved fine, but the landing page (e.g. a
+                # TikTok photo/slideshow post) isn't something yt-dlp can pull a video
+                # from — say so instead of looking like the redirect itself failed.
+                await message.reply(
+                    "❌ That link redirects to a page with no downloadable video "
+                    "(likely a photo/slideshow post, not a real video).",
+                    mention_author=False,
+                )
+            return
+        title = (info.get("title") or "video")[:80]
 
-    # Bail before downloading a multi-GB stream.
-    duration = info.get("duration") or 0
-    if duration and duration > MAX_MINUTES * 60:
-        await message.reply(
-            f"❌ **{title}** is {duration / 60:.0f} min — over the {MAX_MINUTES:g} min limit.",
-            mention_author=False,
-        )
-        return
+        # Bail before downloading a multi-GB stream.
+        duration = info.get("duration") or 0
+        if duration and duration > MAX_MINUTES * 60:
+            await message.reply(
+                f"❌ **{title}** is {duration / 60:.0f} min — over the {MAX_MINUTES:g} min limit.",
+                mention_author=False,
+            )
+            return
 
     # plain send, not a reply — original message gets deleted on success and a
     # reply would leave a broken "original message deleted" reference
@@ -314,7 +337,13 @@ async def on_message(message: discord.Message):
     try:
         t = time.time()
         final: str | None
-        if wants_audio(message.content, url):
+        if is_gif:
+            raw = await asyncio.to_thread(fetch_gif, url, workdir)
+            sz = os.path.getsize(raw)
+            print(f"[timing] gif {time.time()-t:.1f}s, {sz/1e6:.1f}MB")
+            # keep it a .gif; can't shrink without a gif encoder, so fits or it doesn't
+            final = raw if sz <= TARGET_BYTES else None
+        elif wants_audio(message.content, url):
             raw = await asyncio.to_thread(download_audio, url, workdir)
             sz = os.path.getsize(raw)
             print(f"[timing] audio {time.time()-t:.1f}s, {sz/1e6:.1f}MB ({title})")
