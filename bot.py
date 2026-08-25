@@ -128,16 +128,30 @@ def ffprobe_duration(path: str) -> float:
     return float(out.strip() or 0)
 
 
+def first_entry(info: dict) -> dict:
+    """A post holding several videos (e.g. a tweet with 2 clips) comes back as a
+    playlist even with noplaylist — that flag only suppresses real playlists.
+    Descend to the first entry so the rest of the pipeline sees one video.
+    ponytail: first clip only; revisit if anyone asks for the whole set."""
+    while info.get("_type") == "playlist":
+        entries = list(info.get("entries") or [])
+        if not entries:
+            raise yt_dlp.utils.DownloadError("Unsupported URL: no video content")
+        info = entries[0]
+    return info
+
+
 def probe(url: str) -> dict:
     """Validate the link is a real video without downloading. Raises
     DownloadError if it isn't (used to stay silent on non-video links)."""
     with yt_dlp.YoutubeDL({"noplaylist": True, "quiet": True, "socket_timeout": 30,
+                           "playlist_items": "1",  # multi-video post: only the first
                            # -generic: don't scrape random webpages for og:video etc.
                            # Only sites with a real extractor pass; the rest raise
                            # "Unsupported URL" and stay silent.
                            "allowed_extractors": ["default", "-generic"],
                            **cookie_opt()}) as ydl:
-        info = ydl.extract_info(url, download=False)
+        info = first_entry(ydl.extract_info(url, download=False))
     # belt-and-suspenders: a real video has a duration or a video-bearing format
     if not (info.get("duration") or any(
             f.get("vcodec") not in (None, "none") for f in info.get("formats", []))):
@@ -153,6 +167,7 @@ def download(url: str, workdir: str) -> str:
             "format": fmt,
             "outtmpl": os.path.join(workdir, "raw.%(ext)s"),
             "noplaylist": True,
+            "playlist_items": "1",  # multi-video post: only the first
             "quiet": True,
             "socket_timeout": 30,  # fail a stalled connection instead of hanging
             "merge_output_format": "mp4",
@@ -160,7 +175,7 @@ def download(url: str, workdir: str) -> str:
         }
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=True)
+                info = first_entry(ydl.extract_info(url, download=True))
                 raw = ydl.prepare_filename(info)
             if not os.path.exists(raw):  # merged/remuxed extension may differ
                 raw = next((os.path.join(workdir, f) for f in os.listdir(workdir)), raw)
@@ -191,6 +206,7 @@ def download_audio(url: str, workdir: str) -> str:
         "format": "bestaudio/best",
         "outtmpl": os.path.join(workdir, "audio.%(ext)s"),
         "noplaylist": True,
+        "playlist_items": "1",  # multi-track post: only the first
         "quiet": True,
         "socket_timeout": 30,
         "writethumbnail": True,
