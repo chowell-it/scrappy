@@ -124,8 +124,13 @@ _TRACK_KEYS = {
 # .../status/123/photo/1 on a GIF tweet fails with "Media #1 is not a video"
 # even though the same URL with the index dropped extracts it fine (it falls
 # back to a lenient path that accepts video *and* animated_gif). Drop it.
-_TWITTER_HOSTS = {"twitter.com", "x.com", "www.twitter.com", "www.x.com"}
-_TWITTER_MEDIA_INDEX_RE = re.compile(r"(/[^/]+/status/\d+)/(?:photo|video)/\d+$", re.I)
+_TWITTER_HOSTS = ("twitter.com", "x.com")
+# Trailing slash allowed (".../photo/1/") — a bare $ anchor missed that case.
+_TWITTER_MEDIA_INDEX_RE = re.compile(r"(/[^/]+/status/\d+)/(?:photo|video)/\d+/?$", re.I)
+
+
+def _is_twitter_host(host: str) -> bool:
+    return any(host == d or host.endswith("." + d) for d in _TWITTER_HOSTS)
 
 
 def strip_tracking(url: str) -> str:
@@ -133,7 +138,7 @@ def strip_tracking(url: str) -> str:
     kept = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
             if k.lower() not in _TRACK_KEYS and not _TRACK_RE.match(k)]
     path = parts.path
-    if (parts.hostname or "").lower() in _TWITTER_HOSTS:
+    if _is_twitter_host((parts.hostname or "").lower()):
         path = _TWITTER_MEDIA_INDEX_RE.sub(r"\1", path)
     return urlunsplit(parts._replace(path=path, query=urlencode(kept)))
 # Format selectors tried in order until one yields a downloadable file. The
@@ -269,6 +274,7 @@ def first_entry(info: dict) -> dict:
 def probe(url: str) -> dict:
     """Validate the link is a real video without downloading. Raises
     DownloadError if it isn't (used to stay silent on non-video links)."""
+    print(f"[probe] {url}")  # ground truth for what yt-dlp actually received
     with yt_dlp.YoutubeDL({"noplaylist": True, "quiet": True, "socket_timeout": 30,
                            "playlist_items": "1",  # multi-video post: only the first
                            # -generic: don't scrape random webpages for og:video etc.
