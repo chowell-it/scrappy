@@ -149,9 +149,10 @@ covers YouTube, Instagram, and TikTok.
 
 ## Notes
 
-- Free-tier servers cap uploads at **10 MB** — set `DISCORD_MAX_MB` to match
-  your boost tier (L2 = 50, L3 = 100). Long 4K videos may not fit even
-  re-encoded; the bot replies saying so.
+- Free-tier servers cap uploads at **20 MB** (Discord raised it from 10 MB in
+  Aug 2026) — set `DISCORD_MAX_MB` to match your boost tier (L2 = 50,
+  L3 = 100). Long 4K videos may not fit even re-encoded; the bot replies
+  saying so.
 - Videos over `MAX_MINUTES` (default **5**) are skipped before downloading,
   to avoid pulling multi-GB streams that won't fit anyway. Raise it if your
   server has more upload headroom.

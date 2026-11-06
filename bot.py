@@ -41,8 +41,9 @@ TOKEN = os.environ["DISCORD_TOKEN"]
 WATCH_CHANNELS = {
     int(c) for c in os.environ.get("WATCH_CHANNELS", "").replace(" ", "").split(",") if c
 }
-# Discord upload limit (MB) for the server's boost tier. Free tier = 10.
-MAX_MB = float(os.environ.get("DISCORD_MAX_MB", "10"))
+# Discord upload limit (MB) for the server's boost tier. Free tier = 20 (raised
+# from 10 in Aug 2026); boost L2 = 50, L3 = 100.
+MAX_MB = float(os.environ.get("DISCORD_MAX_MB", "20"))
 TARGET_BYTES = int(MAX_MB * 1024 * 1024 * 0.95)  # 5% headroom for container overhead
 # Skip videos longer than this (minutes) — they download huge and rarely fit.
 MAX_MINUTES = float(os.environ.get("MAX_MINUTES", "5"))
