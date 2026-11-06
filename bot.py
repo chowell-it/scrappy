@@ -423,6 +423,36 @@ def process(raw: str, workdir: str) -> str | None:
     return None
 
 
+# GIFs are far less space-efficient than mp4 for the same content, so a
+# multi-minute "gif" would be huge — cap the clip length before converting.
+GIF_MAX_SECONDS = 15
+# (fps, width) tried in order, each pass smaller than the last, until the
+# result fits TARGET_BYTES.
+GIF_QUALITY_STEPS = [(12, 480), (10, 360), (8, 240)]
+
+
+def video_to_gif(src: str, workdir: str) -> str | None:
+    """Convert src (any video ffmpeg can read) to an actual animated .gif,
+    via ffmpeg's two-pass-in-one-command palette trick for decent color
+    quality. Returns the gif path, or None if it still doesn't fit under
+    TARGET_BYTES even at the smallest quality step."""
+    out = os.path.join(workdir, "out.gif")
+    clip_seconds = min(ffprobe_duration(src) or GIF_MAX_SECONDS, GIF_MAX_SECONDS)
+    for fps, width in GIF_QUALITY_STEPS:
+        _run([
+            "ffmpeg", "-y", "-hide_banner", "-nostats", "-loglevel", "error",
+            "-t", f"{clip_seconds}", "-i", src,
+            # never upscale a smaller source — min(width,iw) caps it instead
+            "-vf", f"fps={fps},scale='min({width},iw)':-1:flags=lanczos,split[s0][s1];"
+                   "[s0]palettegen[p];[s1][p]paletteuse",
+            "-loop", "0",
+            out,
+        ])
+        if os.path.getsize(out) <= TARGET_BYTES:
+            return out
+    return None
+
+
 async def grab_video(url: str, workdir: str, on_processing=None) -> str | None:
     """Download then shrink-if-needed. Returns the final playable path, or
     None if it still doesn't fit under MAX_MB after shrinking."""
@@ -686,6 +716,23 @@ async def help_cmd(interaction: discord.Interaction):
     )
 
 
+async def send_as_gif(interaction: discord.Interaction, mp4_path: str, workdir: str) -> None:
+    """Convert mp4_path to an actual .gif and send it; falls back to sending
+    the mp4 as-is (with a note) if the conversion fails or still won't fit."""
+    try:
+        gif_path = await asyncio.to_thread(video_to_gif, mp4_path, workdir)
+    except Exception as e:  # noqa: BLE001 — a bad conversion shouldn't lose the video entirely
+        print(f"[video_to_gif] conversion failed: {e}")
+        gif_path = None
+    if gif_path:
+        await interaction.followup.send(file=discord.File(gif_path))
+    else:
+        await interaction.followup.send(
+            content="-# Couldn't convert that to a .gif (too big or the conversion failed) "
+                    "— sending as video instead.",
+            file=discord.File(mp4_path))
+
+
 @tree.command(name="scrape", description="Grab a video, image, or gif from a link")
 @app_commands.describe(url="Link to a post on a supported site",
                         format="What to grab (default: video)")
@@ -773,7 +820,7 @@ async def scrape_cmd(interaction: discord.Interaction, url: str,
                         dst = os.path.join(workdir, "syndication.mp4")
                         await asyncio.to_thread(
                             lambda: open(dst, "wb").write(_fetch_bytes(mp4_url)))
-                        await interaction.followup.send(file=discord.File(dst))
+                        await send_as_gif(interaction, dst, workdir)
                         return
                 # Truly no video/gif data at all (e.g. the post is just a
                 # static photo despite looking animated in the site's UI) —
@@ -796,7 +843,7 @@ async def scrape_cmd(interaction: discord.Interaction, url: str,
             if not final:
                 await interaction.followup.send(f"❌ Couldn't get that under {MAX_MB:g} MB.")
                 return
-            await interaction.followup.send(file=discord.File(final))
+            await send_as_gif(interaction, final, workdir)
     except yt_dlp.utils.DownloadError as e:
         msg = classify_download_error(e, url) or f"❌ Couldn't fetch that: {e}"
         await interaction.followup.send(msg)

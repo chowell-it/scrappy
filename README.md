@@ -195,9 +195,12 @@ per site and append the files together.
 - `/scrape format:image` pulls whatever image/thumbnail URLs yt-dlp surfaces
   for the post (or a direct image link as-is). It's not a full gallery
   scraper — multi-photo carousels on some sites may only yield one image.
-- `/scrape format:gif` tries, in order: a direct `.gif` file; a short looping
-  mp4 (the common case on Twitter/Reddit/Tumblr, where a "gif" is actually
-  encoded as video with no `.gif` anywhere — Discord displays it the same
-  way); and finally, if there's truly no video/animation data at all (some
-  posts just look animated in the site's own UI but are static photos), the
-  plain image, with a note that it isn't actually moving.
+- `/scrape format:gif` tries, in order: a direct `.gif` file, sent as-is; a
+  short looping mp4 (the common case on Twitter/Reddit/Tumblr, where a "gif"
+  is actually encoded as video with no `.gif` anywhere) — **converted to an
+  actual `.gif` with ffmpeg** (capped at `GIF_MAX_SECONDS`, 15s by default,
+  since gifs are far less space-efficient than mp4 for the same length; falls
+  back to sending the mp4 itself if the conversion fails or still won't fit);
+  and finally, if there's truly no video/animation data at all (some posts
+  just look animated in the site's own UI but are static photos), the plain
+  image, with a note that it isn't actually moving.
