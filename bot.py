@@ -163,14 +163,6 @@ COOKIES = "cookies.txt"
 def cookie_opt() -> dict:
     return {"cookiefile": COOKIES} if os.path.exists(COOKIES) else {}
 
-
-# X's default GraphQL API (yt-dlp's default) has been increasingly incomplete
-# for guest/unauthenticated requests - some tweets' animated_gif media come
-# back with no video_info at all over GraphQL, even though the same content
-# is publicly visible on the logged-out page. The older "legacy" API tends to
-# be more complete for exactly this case. Harmless no-op for every other site.
-EXTRACTOR_ARGS = {"extractor_args": {"twitter": {"api": ["legacy"]}}}
-
 # Recently handled URLs, so a reposted link isn't re-downloaded.
 # ponytail: bounded in-memory LRU; resets on restart, which is fine for spam-guard.
 _seen: "OrderedDict[str, None]" = OrderedDict()
@@ -297,7 +289,7 @@ def probe(url: str) -> dict:
                            # Only sites with a real extractor pass; the rest raise
                            # "Unsupported URL" and stay silent.
                            "allowed_extractors": ["default", "-generic"],
-                           **cookie_opt(), **EXTRACTOR_ARGS}) as ydl:
+                           **cookie_opt()}) as ydl:
         info = first_entry(ydl.extract_info(url, download=False))
     # belt-and-suspenders: a real video has a duration or a video-bearing format
     if not (info.get("duration") or any(
@@ -318,7 +310,7 @@ def download(url: str, workdir: str) -> str:
             "quiet": True,
             "socket_timeout": 30,  # fail a stalled connection instead of hanging
             "merge_output_format": "mp4",
-            **cookie_opt(), **EXTRACTOR_ARGS,
+            **cookie_opt(),
         }
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -362,7 +354,7 @@ def download_audio(url: str, workdir: str) -> str:
             {"key": "FFmpegMetadata"},
             {"key": "EmbedThumbnail"},
         ],
-        **cookie_opt(), **EXTRACTOR_ARGS,
+        **cookie_opt(),
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.extract_info(url, download=True)
@@ -464,7 +456,7 @@ def fetch_images(url: str, workdir: str, want_gif: bool) -> list[str]:
     else:
         with yt_dlp.YoutubeDL({"quiet": True, "socket_timeout": 30,
                                "allowed_extractors": ["default", "-generic"],
-                               **cookie_opt(), **EXTRACTOR_ARGS}) as ydl:
+                               **cookie_opt()}) as ydl:
             info = ydl.extract_info(url, download=False)
         for entry in info.get("entries") or [info]:
             thumbs = entry.get("thumbnails") or []
