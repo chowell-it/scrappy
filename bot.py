@@ -20,6 +20,14 @@ import tempfile
 import time
 import traceback
 import urllib.request
+
+# stdout/stderr are fully block-buffered when not attached to a terminal
+# (true under systemd/journald) - every print() here would otherwise sit
+# invisible in a buffer until the process exits or the buffer fills, making
+# journalctl look like nothing happened for whatever triggered it. Force
+# line buffering so log lines show up as they're printed.
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
 from collections import OrderedDict
 from typing import Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
