@@ -118,11 +118,24 @@ _TRACK_KEYS = {
 }
 
 
+# Twitter/X URLs carry a trailing /photo/N or /video/N selecting one media
+# item. yt-dlp's extractor then requires that item's type to be literally
+# "video" — but a tweet's GIF is internally typed "animated_gif", so e.g.
+# .../status/123/photo/1 on a GIF tweet fails with "Media #1 is not a video"
+# even though the same URL with the index dropped extracts it fine (it falls
+# back to a lenient path that accepts video *and* animated_gif). Drop it.
+_TWITTER_HOSTS = {"twitter.com", "x.com", "www.twitter.com", "www.x.com"}
+_TWITTER_MEDIA_INDEX_RE = re.compile(r"(/[^/]+/status/\d+)/(?:photo|video)/\d+$", re.I)
+
+
 def strip_tracking(url: str) -> str:
     parts = urlsplit(url)
     kept = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
             if k.lower() not in _TRACK_KEYS and not _TRACK_RE.match(k)]
-    return urlunsplit(parts._replace(query=urlencode(kept)))
+    path = parts.path
+    if (parts.hostname or "").lower() in _TWITTER_HOSTS:
+        path = _TWITTER_MEDIA_INDEX_RE.sub(r"\1", path)
+    return urlunsplit(parts._replace(path=path, query=urlencode(kept)))
 # Format selectors tried in order until one yields a downloadable file. The
 # strict mp4 pick is best for Discord; "best" is the catch-all when a site
 # offers no mp4. ponytail: two rungs cover ~everything; add more only if a real
@@ -624,7 +637,10 @@ async def scrape_cmd(interaction: discord.Interaction, url: str,
             try:
                 info = await asyncio.to_thread(probe, url)
             except yt_dlp.utils.DownloadError as e:
-                msg = classify_download_error(e, url) or "❌ Couldn't find a video at that link."
+                msg = classify_download_error(e, url)
+                if not msg:
+                    print(f"[/scrape video] probe failed for {url}: {e}")
+                    msg = "❌ Couldn't find a video at that link."
                 await interaction.followup.send(msg)
                 return
             title = (info.get("title") or "video")[:80]
@@ -658,7 +674,10 @@ async def scrape_cmd(interaction: discord.Interaction, url: str,
             try:
                 info = await asyncio.to_thread(probe, url)
             except yt_dlp.utils.DownloadError as e:
-                msg = classify_download_error(e, url) or "❌ Couldn't find a gif at that link."
+                msg = classify_download_error(e, url)
+                if not msg:
+                    print(f"[/scrape gif-fallback] probe failed for {url}: {e}")
+                    msg = "❌ Couldn't find a gif at that link."
                 await interaction.followup.send(msg)
                 return
             duration = info.get("duration") or 0
