@@ -428,7 +428,7 @@ def process(raw: str, workdir: str) -> str | None:
 GIF_MAX_SECONDS = 15
 # (fps, width) tried in order, each pass smaller than the last, until the
 # result fits TARGET_BYTES.
-GIF_QUALITY_STEPS = [(12, 480), (10, 360), (8, 240)]
+GIF_QUALITY_STEPS = [(20, 480), (15, 360), (10, 240)]
 
 
 def video_to_gif(src: str, workdir: str) -> str | None:
