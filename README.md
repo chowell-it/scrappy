@@ -56,7 +56,10 @@ to once/day), so a VPS restart picks up the fix automatically.
 
 - `/help` — what the bot does, supported sites, current limits.
 - `/scrape url format:` — grab a video (default), image, or gif from a
-  supported link on demand, regardless of the dedupe/auto-watch flow.
+  supported link on demand, regardless of the dedupe/auto-watch flow. Shows
+  live status as it works (checking the link, a progress bar while
+  downloading, converting, …) by editing its own reply in place, and the
+  original link stays visible as a footer on the final result either way.
 - `/watch add|remove|list` — configure which channels scrappy auto-watches
   (posted links trigger a download) in this server (needs **Manage
   Channels**). Settings persist in `watch_channels.json` next to `bot.py`

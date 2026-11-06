@@ -299,7 +299,7 @@ def probe(url: str) -> dict:
     return info
 
 
-def download(url: str, workdir: str) -> str:
+def download(url: str, workdir: str, progress_hook=None) -> str:
     """Download url, retrying each format selector until one works."""
     last_err: Exception | None = None
     for fmt in FORMATS:
@@ -313,6 +313,8 @@ def download(url: str, workdir: str) -> str:
             "merge_output_format": "mp4",
             **cookie_opt(),
         }
+        if progress_hook:
+            opts["progress_hooks"] = [progress_hook]
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = first_entry(ydl.extract_info(url, download=True))
@@ -453,10 +455,39 @@ def video_to_gif(src: str, workdir: str) -> str | None:
     return None
 
 
-async def grab_video(url: str, workdir: str, on_processing=None) -> str | None:
+def progress_bar(pct: float, width: int = 16) -> str:
+    pct = max(0.0, min(1.0, pct))
+    filled = round(width * pct)
+    return "▓" * filled + "░" * (width - filled) + f" {pct * 100:.0f}%"
+
+
+def make_progress_hook(loop: asyncio.AbstractEventLoop, set_status, prefix: str,
+                        min_interval: float = 2.0):
+    """A yt-dlp progress_hook that throttles updates and schedules
+    set_status(text) (an async function) onto loop. Runs inside yt-dlp's own
+    worker thread (download() is called via asyncio.to_thread), not the
+    event loop, so it can't just await — hands the edit off instead."""
+    last = [0.0]
+
+    def hook(d: dict) -> None:
+        if d.get("status") != "downloading":
+            return
+        now = time.time()
+        if now - last[0] < min_interval:
+            return
+        last[0] = now
+        total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+        downloaded = d.get("downloaded_bytes") or 0
+        pct = downloaded / total if total else 0.0
+        asyncio.run_coroutine_threadsafe(set_status(f"{prefix} {progress_bar(pct)}"), loop)
+
+    return hook
+
+
+async def grab_video(url: str, workdir: str, on_processing=None, progress_hook=None) -> str | None:
     """Download then shrink-if-needed. Returns the final playable path, or
     None if it still doesn't fit under MAX_MB after shrinking."""
-    raw = await asyncio.to_thread(download, url, workdir)
+    raw = await asyncio.to_thread(download, url, workdir, progress_hook)
     if os.path.getsize(raw) <= TARGET_BYTES:
         return raw
     if on_processing:
@@ -716,21 +747,26 @@ async def help_cmd(interaction: discord.Interaction):
     )
 
 
-async def send_as_gif(interaction: discord.Interaction, mp4_path: str, workdir: str) -> None:
+async def send_as_gif(interaction: discord.Interaction, mp4_path: str, workdir: str, url: str) -> None:
     """Convert mp4_path to an actual .gif and send it; falls back to sending
     the mp4 as-is (with a note) if the conversion fails or still won't fit."""
+    try:
+        await interaction.edit_original_response(content="🎨 Converting to gif…")
+    except discord.HTTPException:
+        pass
     try:
         gif_path = await asyncio.to_thread(video_to_gif, mp4_path, workdir)
     except Exception as e:  # noqa: BLE001 — a bad conversion shouldn't lose the video entirely
         print(f"[video_to_gif] conversion failed: {e}")
         gif_path = None
+    link = f"-# 📎 `{url}`"
     if gif_path:
-        await interaction.followup.send(file=discord.File(gif_path))
+        await interaction.edit_original_response(content=link, attachments=[discord.File(gif_path)])
     else:
-        await interaction.followup.send(
+        await interaction.edit_original_response(
             content="-# Couldn't convert that to a .gif (too big or the conversion failed) "
-                    "— sending as video instead.",
-            file=discord.File(mp4_path))
+                    f"— sending as video instead.\n{link}",
+            attachments=[discord.File(mp4_path)])
 
 
 @tree.command(name="scrape", description="Grab a video, image, or gif from a link")
@@ -757,6 +793,18 @@ async def scrape_cmd(interaction: discord.Interaction, url: str,
         return
 
     await interaction.response.defer(thinking=True)
+    # the link stays visible on every outcome, success or failure, as a
+    # footer on the single message this command edits in place throughout
+    link = f"-# 📎 `{url}`"
+
+    async def set_status(text: str) -> None:
+        try:
+            await interaction.edit_original_response(content=text)
+        except discord.HTTPException:
+            pass
+
+    await set_status("🔎 Checking link…")
+    loop = asyncio.get_running_loop()
     workdir = tempfile.mkdtemp(prefix="scrappy_")
     try:
         if fmt == "video":
@@ -767,30 +815,42 @@ async def scrape_cmd(interaction: discord.Interaction, url: str,
                 if not msg:
                     print(f"[/scrape video] probe failed for {url}: {e}")
                     msg = "❌ Couldn't find a video at that link."
-                await interaction.followup.send(msg)
+                await set_status(msg)
                 return
             title = (info.get("title") or "video")[:80]
             duration = info.get("duration") or 0
             if duration and duration > MAX_MINUTES * 60:
-                await interaction.followup.send(
-                    f"❌ **{title}** is {duration / 60:.0f} min — over the "
-                    f"{MAX_MINUTES:g} min limit.")
+                await set_status(f"❌ **{title}** is {duration / 60:.0f} min — over the "
+                                  f"{MAX_MINUTES:g} min limit.")
                 return
-            final = await grab_video(url, workdir)
+
+            async def mark_processing():
+                await set_status(f"🔧 Processing **{title}** (shrinking to fit)…")
+
+            hook = make_progress_hook(loop, set_status, f"📥 Downloading **{title}**…")
+            await set_status(f"📥 Downloading **{title}**… {progress_bar(0)}")
+            final = await grab_video(url, workdir, mark_processing, hook)
             if not final:
-                await interaction.followup.send(f"❌ Couldn't get **{title}** under {MAX_MB:g} MB.")
+                await set_status(f"❌ Couldn't get **{title}** under {MAX_MB:g} MB.")
                 return
-            await interaction.followup.send(content=f"**{title}**", file=discord.File(final))
+            await interaction.edit_original_response(
+                content=f"**{title}**\n{link}", attachments=[discord.File(final)])
+
         elif fmt == "image":
+            await set_status("🖼️ Fetching image…")
             paths = await asyncio.to_thread(fetch_images, url, workdir, want_gif=False)
             if not paths:
-                await interaction.followup.send("❌ Couldn't find any images at that link.")
+                await set_status("❌ Couldn't find any images at that link.")
                 return
-            await interaction.followup.send(files=[discord.File(p) for p in paths])
+            await interaction.edit_original_response(
+                content=link, attachments=[discord.File(p) for p in paths])
+
         else:  # gif
+            await set_status("🎞️ Looking for a gif…")
             paths = await asyncio.to_thread(fetch_images, url, workdir, want_gif=True)
             if paths:
-                await interaction.followup.send(files=[discord.File(p) for p in paths])
+                await interaction.edit_original_response(
+                    content=link, attachments=[discord.File(p) for p in paths])
                 return
             # No literal .gif file/thumbnail found — on most sites (Twitter,
             # Reddit, Tumblr...) what displays as a "gif" is actually encoded
@@ -802,7 +862,7 @@ async def scrape_cmd(interaction: discord.Interaction, url: str,
             except yt_dlp.utils.DownloadError as e:
                 msg = classify_download_error(e, url)
                 if msg:
-                    await interaction.followup.send(msg)
+                    await set_status(msg)
                     return
                 print(f"[/scrape gif-fallback] probe failed for {url}: {e}")
                 # yt-dlp's GraphQL-based extraction has a known gap for some
@@ -811,47 +871,55 @@ async def scrape_cmd(interaction: discord.Interaction, url: str,
                 # embed widget's own API before giving up on there being a
                 # video at all.
                 if _is_twitter_host((urlsplit(url).hostname or "").lower()):
+                    await set_status("🔁 Checking X's embed data for a gif…")
                     try:
                         mp4_url = await asyncio.to_thread(fetch_twitter_gif, url)
                     except Exception as e2:  # noqa: BLE001
                         print(f"[/scrape gif-fallback] syndication lookup failed for {url}: {e2}")
                         mp4_url = None
                     if mp4_url:
+                        await set_status("📥 Downloading gif…")
                         dst = os.path.join(workdir, "syndication.mp4")
                         await asyncio.to_thread(
                             lambda: open(dst, "wb").write(_fetch_bytes(mp4_url)))
-                        await send_as_gif(interaction, dst, workdir)
+                        await send_as_gif(interaction, dst, workdir, url)
                         return
                 # Truly no video/gif data at all (e.g. the post is just a
                 # static photo despite looking animated in the site's UI) —
                 # last resort: send the image instead of failing outright.
+                await set_status("🖼️ No gif/video data — trying the image instead…")
                 img_paths = await asyncio.to_thread(fetch_images, url, workdir, want_gif=False)
                 if not img_paths:
-                    await interaction.followup.send("❌ Couldn't find a gif at that link.")
+                    await set_status("❌ Couldn't find a gif at that link.")
                     return
-                await interaction.followup.send(
-                    content="-# Not actually animated — sending the image instead.",
-                    files=[discord.File(p) for p in img_paths])
+                await interaction.edit_original_response(
+                    content=f"-# Not actually animated — sending the image instead.\n{link}",
+                    attachments=[discord.File(p) for p in img_paths])
                 return
             duration = info.get("duration") or 0
             if duration and duration > MAX_MINUTES * 60:
-                await interaction.followup.send(
-                    f"❌ That's {duration / 60:.0f} min — not really a gif, and over the "
-                    f"{MAX_MINUTES:g} min limit.")
+                await set_status(f"❌ That's {duration / 60:.0f} min — not really a gif, and "
+                                  f"over the {MAX_MINUTES:g} min limit.")
                 return
-            final = await grab_video(url, workdir)
+
+            async def mark_processing():
+                await set_status("🔧 Processing (shrinking to fit)…")
+
+            hook = make_progress_hook(loop, set_status, "📥 Downloading gif source…")
+            await set_status(f"📥 Downloading gif source… {progress_bar(0)}")
+            final = await grab_video(url, workdir, mark_processing, hook)
             if not final:
-                await interaction.followup.send(f"❌ Couldn't get that under {MAX_MB:g} MB.")
+                await set_status(f"❌ Couldn't get that under {MAX_MB:g} MB.")
                 return
-            await send_as_gif(interaction, final, workdir)
+            await send_as_gif(interaction, final, workdir, url)
     except yt_dlp.utils.DownloadError as e:
         msg = classify_download_error(e, url) or f"❌ Couldn't fetch that: {e}"
-        await interaction.followup.send(msg)
+        await set_status(msg)
     except discord.HTTPException as e:
-        await interaction.followup.send(f"❌ Discord rejected the upload: {e}")
+        await set_status(f"❌ Discord rejected the upload: {e}")
     except Exception as e:  # noqa: BLE001
         print(f"[/scrape] unexpected error on {url}: {e}")
-        await interaction.followup.send(f"❌ Failed: {e}")
+        await set_status(f"❌ Failed: {e}")
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
