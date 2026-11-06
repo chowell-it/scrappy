@@ -1,11 +1,16 @@
 """Discord video-scraper bot.
 
-Watches configured channel(s) for video links, downloads with yt-dlp,
-shrinks with ffmpeg to fit Discord's upload limit, replies with the file.
-Posts live status (Downloading -> Processing -> video) in a single message.
+Watches configured channel(s) for video links from a fixed list of social
+sites, downloads with yt-dlp, shrinks with ffmpeg to fit Discord's upload
+limit, replies with the file. Posts live status (Downloading -> Processing ->
+video) in a single message.
+
+Also exposes slash commands (`/help`, `/scrape`, `/watch ...`) for on-demand
+scraping (video/image/gif) and per-server channel configuration.
 """
 
 import asyncio
+import json
 import os
 import re
 import shutil
@@ -13,10 +18,14 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
+import urllib.request
 from collections import OrderedDict
+from typing import Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import discord
+from discord import app_commands
 
 # --- config (load .env before importing yt-dlp so AUTO_UPDATE can apply) -----
 if os.path.exists(".env"):
@@ -27,7 +36,8 @@ if os.path.exists(".env"):
             os.environ.setdefault(k.strip(), v.strip())
 
 TOKEN = os.environ["DISCORD_TOKEN"]
-# Comma-separated channel IDs to watch. Empty = every channel the bot can see.
+# Comma-separated channel IDs to watch, legacy/global fallback used when a
+# guild hasn't configured its own list with /watch. Empty = every channel.
 WATCH_CHANNELS = {
     int(c) for c in os.environ.get("WATCH_CHANNELS", "").replace(" ", "").split(",") if c
 }
@@ -35,9 +45,12 @@ WATCH_CHANNELS = {
 MAX_MB = float(os.environ.get("DISCORD_MAX_MB", "10"))
 TARGET_BYTES = int(MAX_MB * 1024 * 1024 * 0.95)  # 5% headroom for container overhead
 # Skip videos longer than this (minutes) — they download huge and rarely fit.
-MAX_MINUTES = float(os.environ.get("MAX_MINUTES", "30"))
+MAX_MINUTES = float(os.environ.get("MAX_MINUTES", "5"))
 # Self-heal: refresh yt-dlp on startup so site changes don't break extraction.
 AUTO_UPDATE = os.environ.get("AUTO_UPDATE", "1") == "1"
+# Sync slash commands to one guild instantly (for dev); unset = global sync,
+# which can take up to an hour to show up everywhere.
+DEV_GUILD_ID = os.environ.get("DEV_GUILD_ID") or None
 
 # Throttle the update to once/day so frequent restarts don't pay the cost each time.
 _UPDATE_MARKER = os.path.join(tempfile.gettempdir(), ".scrappy_ytdlp_update")
@@ -54,6 +67,39 @@ if AUTO_UPDATE and (not os.path.exists(_UPDATE_MARKER)
 import yt_dlp  # noqa: E402  (imported after the optional self-update above)
 
 URL_RE = re.compile(r"https?://\S+")
+
+# The only sites scrappy will touch. Keeps it from trying (and failing oddly
+# on) random video embeds elsewhere, and keeps the attack surface small.
+# domain -> display name, used in "unsupported site" messages.
+ALLOWED_SITES = {
+    "tiktok.com": "TikTok",
+    "youtube.com": "YouTube",
+    "youtu.be": "YouTube",
+    "twitter.com": "Twitter/X",
+    "x.com": "Twitter/X",
+    "instagram.com": "Instagram",
+    "facebook.com": "Facebook",
+    "fb.watch": "Facebook",
+    "reddit.com": "Reddit",
+    "redd.it": "Reddit",
+    "twitch.tv": "Twitch",
+    "snapchat.com": "Snapchat",
+    "pinterest.com": "Pinterest",
+    "pin.it": "Pinterest",
+    "tumblr.com": "Tumblr",
+    "vimeo.com": "Vimeo",
+    "linkedin.com": "LinkedIn",
+    "threads.net": "Threads",
+    "bsky.app": "Bluesky",
+    "streamable.com": "Streamable",
+}
+SUPPORTED_SITES_TEXT = ", ".join(sorted(set(ALLOWED_SITES.values())))
+
+
+def site_allowed(url: str) -> bool:
+    host = (urlsplit(url).hostname or "").lower()
+    return any(host == d or host.endswith("." + d) for d in ALLOWED_SITES)
+
 
 # Tracking/telemetry query params to strip from shared links before we touch them.
 # ponytail: a known-junk denylist covers real-world shares; widen only if a real
@@ -107,9 +153,65 @@ def already_seen(url: str) -> bool:
 # same URL, stays silent).
 _NO_EXTRACTOR_RE = re.compile(r"no suitable extractor found for url (\S+)")
 
+
+def classify_download_error(e: Exception, url: str) -> Optional[str]:
+    """Turn a DownloadError into a user-facing message, or None to stay silent."""
+    err = str(e).lower()
+    # Only speak up when the link IS a video but is auth-walled. Everything
+    # else (plain webpages, dead links, scrape failures) stays silent.
+    auth = ("sign in", "log in", "login", "private", "age-restrict",
+            "confirm your age", "not a bot", "members-only", "403")
+    if any(a in err for a in auth):
+        return ("❌ Can't fetch that — looks age-restricted, private, or it wants "
+                "a login. Add a `cookies.txt` on the host to access these.")
+    no_extractor = _NO_EXTRACTOR_RE.search(err)
+    if no_extractor and no_extractor.group(1).rstrip(".,)") != url.lower():
+        # The shortlink's redirect resolved fine, but the landing page (e.g. a
+        # TikTok photo/slideshow post) isn't something yt-dlp can pull a video
+        # from — say so instead of looking like the redirect itself failed.
+        return ("❌ That link redirects to a page with no downloadable video "
+                "(likely a photo/slideshow post, not a real video).")
+    return None
+
+
+# --- per-guild channel configuration (persisted across restarts) ------------
+WATCH_CONFIG_PATH = "watch_channels.json"
+
+
+def _load_watch_config() -> dict:
+    if not os.path.exists(WATCH_CONFIG_PATH):
+        return {}
+    try:
+        with open(WATCH_CONFIG_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"watch_channels.json unreadable ({e}), starting fresh")
+        return {}
+
+
+def _save_watch_config(cfg: dict) -> None:
+    tmp = WATCH_CONFIG_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cfg, f)
+    os.replace(tmp, WATCH_CONFIG_PATH)  # atomic; a crash mid-write can't corrupt the file
+
+
+_watch_config: dict = _load_watch_config()
+
+
+def channel_allowed(guild_id: Optional[int], channel_id: int) -> bool:
+    if guild_id is None:  # DMs: no per-guild config applies
+        return True
+    configured = _watch_config.get(str(guild_id))
+    if configured:
+        return channel_id in configured
+    return not WATCH_CHANNELS or channel_id in WATCH_CHANNELS  # legacy env fallback
+
+
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
+tree = app_commands.CommandTree(client)
 
 
 def _run(cmd: list[str], timeout: int = 600) -> str:
@@ -210,23 +312,105 @@ def process(raw: str, workdir: str) -> str | None:
     return None
 
 
+async def grab_video(url: str, workdir: str, on_processing=None) -> str | None:
+    """Download then shrink-if-needed. Returns the final playable path, or
+    None if it still doesn't fit under MAX_MB after shrinking."""
+    raw = await asyncio.to_thread(download, url, workdir)
+    if os.path.getsize(raw) <= TARGET_BYTES:
+        return raw
+    if on_processing:
+        await on_processing()
+    return await asyncio.to_thread(process, raw, workdir)
+
+
+# --- image / gif grabbing ----------------------------------------------------
+# Deliberately simple: direct image/gif links download as-is; anything else
+# goes through yt-dlp and we pull whatever thumbnail/image URLs it surfaced.
+# This covers the common cases (a direct media link, or a post yt-dlp already
+# has thumbnail metadata for) — it isn't a full gallery scraper.
+_IMG_EXT_RE = re.compile(r"\.(jpe?g|png|webp|gif)(?:$|\?)", re.I)
+MAX_IMAGES = 10
+
+
+def _fetch_bytes(url: str, timeout: int = 30) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (fixed http(s) scheme from yt-dlp/our own regex)
+        return resp.read()
+
+
+def fetch_images(url: str, workdir: str, want_gif: bool) -> list[str]:
+    """Grab image(s)/gif(s) referenced by url. Returns saved file paths."""
+    candidates: list[str] = []
+    if _IMG_EXT_RE.search(url):
+        candidates = [url]
+    else:
+        with yt_dlp.YoutubeDL({"quiet": True, "socket_timeout": 30,
+                               "allowed_extractors": ["default", "-generic"],
+                               **cookie_opt()}) as ydl:
+            info = ydl.extract_info(url, download=False)
+        for entry in info.get("entries") or [info]:
+            thumbs = entry.get("thumbnails") or []
+            if thumbs:
+                candidates.append(thumbs[-1]["url"])  # last = highest-res
+            elif entry.get("url") and _IMG_EXT_RE.search(entry["url"]):
+                candidates.append(entry["url"])
+
+    if want_gif:
+        candidates = [u for u in candidates if u.lower().split("?")[0].endswith(".gif")]
+
+    paths = []
+    for i, u in enumerate(candidates[:MAX_IMAGES]):
+        m = _IMG_EXT_RE.search(u)
+        ext = m.group(1).lower() if m else "jpg"
+        try:
+            data = _fetch_bytes(u)
+        except Exception as e:  # noqa: BLE001 — one bad image shouldn't sink the rest
+            print(f"[fetch_images] skipping {u}: {e}")
+            continue
+        path = os.path.join(workdir, f"image_{i}.{ext}")
+        with open(path, "wb") as f:
+            f.write(data)
+        paths.append(path)
+    return paths
+
+
 @client.event
 async def on_ready():
+    try:
+        if DEV_GUILD_ID:
+            guild = discord.Object(id=int(DEV_GUILD_ID))
+            tree.copy_global_to(guild=guild)
+            await tree.sync(guild=guild)
+        else:
+            await tree.sync()
+    except Exception as e:  # noqa: BLE001 — don't let a sync hiccup kill startup
+        print(f"Slash command sync failed: {e}")
     print(f"Logged in as {client.user}")
+
+
+@client.event
+async def on_error(event: str, *args, **kwargs):
+    # discord.py's default handler already logs to stderr; this just makes
+    # sure a bug in one handler can't take the whole bot down silently.
+    print(f"[on_error] unhandled exception in {event}:")
+    traceback.print_exc()
 
 
 @client.event
 async def on_message(message: discord.Message):
     if message.author.bot:
         return
-    if WATCH_CHANNELS and message.channel.id not in WATCH_CHANNELS:
+    if not channel_allowed(message.guild.id if message.guild else None, message.channel.id):
         return
     m = URL_RE.search(message.content)
     if not m:
         return
     url = strip_tracking(m.group(0))
-    # ponytail: skip GIFs (tenor/giphy/.gif) — not videos worth scraping/re-encoding
+    # ponytail: skip GIFs (tenor/giphy/.gif) in passive watching — grabbing
+    # one on demand is what /scrape format:gif is for.
     if re.search(r"\.gif($|\?)|tenor\.com|giphy\.com", url, re.I):
+        return
+    if not site_allowed(url):
         return
     if already_seen(url):  # reposted link, don't re-download
         return
@@ -236,27 +420,14 @@ async def on_message(message: discord.Message):
     try:
         info = await asyncio.to_thread(probe, url)
     except yt_dlp.utils.DownloadError as e:
-        err = str(e).lower()
-        # Only speak up when the link IS a video but is auth-walled. Everything
-        # else (plain webpages, dead links, scrape failures) stays silent.
-        auth = ("sign in", "log in", "login", "private", "age-restrict",
-                "confirm your age", "not a bot", "members-only", "403")
-        no_extractor = _NO_EXTRACTOR_RE.search(err)
-        if any(a in err for a in auth):
-            await message.reply(
-                "❌ Can't fetch that — looks age-restricted, private, or it wants "
-                "a login. Add a `cookies.txt` on the host to access these.",
-                mention_author=False,
-            )
-        elif no_extractor and no_extractor.group(1).rstrip(".,)") != url.lower():
-            # The shortlink's redirect resolved fine, but the landing page (e.g. a
-            # TikTok photo/slideshow post) isn't something yt-dlp can pull a video
-            # from — say so instead of looking like the redirect itself failed.
-            await message.reply(
-                "❌ That link redirects to a page with no downloadable video "
-                "(likely a photo/slideshow post, not a real video).",
-                mention_author=False,
-            )
+        msg = classify_download_error(e, url)
+        if msg:
+            await message.reply(msg, mention_author=False)
+        return
+    except Exception as e:  # noqa: BLE001 — surface real bugs instead of going silent
+        print(f"[probe] unexpected error on {url}: {e}")
+        await message.reply(f"❌ Something went wrong checking that link: {e}",
+                             mention_author=False)
         return
     title = (info.get("title") or "video")[:80]
 
@@ -275,16 +446,12 @@ async def on_message(message: discord.Message):
     workdir = tempfile.mkdtemp(prefix="scrappy_")
     try:
         t = time.time()
-        raw = await asyncio.to_thread(download, url, workdir)
-        sz = os.path.getsize(raw)
-        print(f"[timing] download {time.time()-t:.1f}s, raw {sz/1e6:.1f}MB ({title})")
-        if sz <= TARGET_BYTES:
-            final: str | None = raw
-        else:
+
+        async def mark_processing():
             await status.edit(content=f"🔧 Processing **{title}** (shrinking to fit)…")
-            t = time.time()
-            final = await asyncio.to_thread(process, raw, workdir)
-            print(f"[timing] encode {time.time()-t:.1f}s ({title})")
+
+        final = await grab_video(url, workdir, mark_processing)
+        print(f"[timing] {time.time()-t:.1f}s ({title})")
 
         if final:
             # editing the status message with the file shows the "uploaded" result
@@ -300,10 +467,156 @@ async def on_message(message: discord.Message):
             await status.edit(content=f"❌ Couldn't get **{title}** under {MAX_MB:g} MB.")
     except yt_dlp.utils.DownloadError:
         await status.edit(content="❌ Download failed (link may need login or be unavailable).")
+    except discord.HTTPException as e:
+        await status.edit(content=f"❌ Discord rejected the upload: {e}")
     except Exception as e:  # noqa: BLE001
+        print(f"[on_message] unexpected error on {url}: {e}")
         await status.edit(content=f"❌ Failed: {e}")
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+# --- slash commands -----------------------------------------------------------
+
+@tree.command(name="help", description="Show what scrappy can do")
+async def help_cmd(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        "**scrappy** grabs media from links so you don't have to.\n\n"
+        "- Drop a link in a watched channel and it auto-downloads the video.\n"
+        f"- `/scrape url format:` grab a video, image, or gif on demand.\n"
+        f"- `/watch add|remove|list` configure which channels it watches "
+        "(needs Manage Channels).\n\n"
+        f"Supported sites: {SUPPORTED_SITES_TEXT}.\n"
+        f"Videos longer than {MAX_MINUTES:g} min are skipped.",
+        ephemeral=True,
+    )
+
+
+@tree.command(name="scrape", description="Grab a video, image, or gif from a link")
+@app_commands.describe(url="Link to a post on a supported site",
+                        format="What to grab (default: video)")
+@app_commands.choices(format=[
+    app_commands.Choice(name="video", value="video"),
+    app_commands.Choice(name="image", value="image"),
+    app_commands.Choice(name="gif", value="gif"),
+])
+async def scrape_cmd(interaction: discord.Interaction, url: str,
+                      format: Optional[app_commands.Choice[str]] = None):
+    if interaction.guild and not channel_allowed(interaction.guild.id, interaction.channel_id):
+        await interaction.response.send_message(
+            "❌ scrappy isn't configured to work in this channel.", ephemeral=True)
+        return
+
+    url = strip_tracking(url.strip())
+    if not site_allowed(url):
+        await interaction.response.send_message(
+            f"❌ Unsupported site. Supported: {SUPPORTED_SITES_TEXT}.", ephemeral=True)
+        return
+
+    fmt = format.value if format else "video"
+    await interaction.response.defer(thinking=True)
+    workdir = tempfile.mkdtemp(prefix="scrappy_")
+    try:
+        if fmt == "video":
+            try:
+                info = await asyncio.to_thread(probe, url)
+            except yt_dlp.utils.DownloadError as e:
+                msg = classify_download_error(e, url) or "❌ Couldn't find a video at that link."
+                await interaction.followup.send(msg)
+                return
+            title = (info.get("title") or "video")[:80]
+            duration = info.get("duration") or 0
+            if duration and duration > MAX_MINUTES * 60:
+                await interaction.followup.send(
+                    f"❌ **{title}** is {duration / 60:.0f} min — over the "
+                    f"{MAX_MINUTES:g} min limit.")
+                return
+            final = await grab_video(url, workdir)
+            if not final:
+                await interaction.followup.send(f"❌ Couldn't get **{title}** under {MAX_MB:g} MB.")
+                return
+            await interaction.followup.send(content=f"**{title}**", file=discord.File(final))
+        else:
+            paths = await asyncio.to_thread(fetch_images, url, workdir, fmt == "gif")
+            if not paths:
+                await interaction.followup.send(f"❌ Couldn't find any {fmt}s at that link.")
+                return
+            await interaction.followup.send(files=[discord.File(p) for p in paths])
+    except yt_dlp.utils.DownloadError as e:
+        msg = classify_download_error(e, url) or f"❌ Couldn't fetch that: {e}"
+        await interaction.followup.send(msg)
+    except discord.HTTPException as e:
+        await interaction.followup.send(f"❌ Discord rejected the upload: {e}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[/scrape] unexpected error on {url}: {e}")
+        await interaction.followup.send(f"❌ Failed: {e}")
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+watch_group = app_commands.Group(
+    name="watch", description="Configure which channels scrappy watches for links")
+
+
+@watch_group.command(name="add", description="Make scrappy watch a channel")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def watch_add(interaction: discord.Interaction, channel: discord.TextChannel):
+    guild_id = str(interaction.guild_id)
+    cfg = _watch_config.setdefault(guild_id, [])
+    if channel.id in cfg:
+        await interaction.response.send_message(
+            f"{channel.mention} is already watched.", ephemeral=True)
+        return
+    cfg.append(channel.id)
+    _save_watch_config(_watch_config)
+    await interaction.response.send_message(f"✅ Now watching {channel.mention}.", ephemeral=True)
+
+
+@watch_group.command(name="remove", description="Stop scrappy watching a channel")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def watch_remove(interaction: discord.Interaction, channel: discord.TextChannel):
+    guild_id = str(interaction.guild_id)
+    cfg = _watch_config.get(guild_id, [])
+    if channel.id not in cfg:
+        await interaction.response.send_message(
+            f"{channel.mention} isn't on the watch list.", ephemeral=True)
+        return
+    cfg.remove(channel.id)
+    _save_watch_config(_watch_config)
+    await interaction.response.send_message(f"✅ Stopped watching {channel.mention}.",
+                                              ephemeral=True)
+
+
+@watch_group.command(name="list", description="Show which channels scrappy is watching")
+async def watch_list(interaction: discord.Interaction):
+    cfg = _watch_config.get(str(interaction.guild_id), [])
+    if cfg:
+        mentions = ", ".join(f"<#{c}>" for c in cfg)
+        await interaction.response.send_message(f"Watching: {mentions}", ephemeral=True)
+    elif WATCH_CHANNELS:
+        await interaction.response.send_message(
+            "No per-server config; falling back to the bot's global "
+            "`WATCH_CHANNELS` env setting.", ephemeral=True)
+    else:
+        await interaction.response.send_message(
+            "No channels configured — watching every channel I can see.", ephemeral=True)
+
+
+tree.add_command(watch_group)
+
+
+@tree.error
+async def on_app_command_error(interaction: discord.Interaction,
+                                error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        msg = "❌ You need the **Manage Channels** permission to do that."
+    else:
+        print(f"[slash command error] {error}")
+        msg = f"❌ Something went wrong: {error}"
+    if interaction.response.is_done():
+        await interaction.followup.send(msg, ephemeral=True)
+    else:
+        await interaction.response.send_message(msg, ephemeral=True)
 
 
 if __name__ == "__main__":
