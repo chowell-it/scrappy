@@ -2,6 +2,9 @@
 .env
 cookies.txt
 
+# runtime state — per-deployment, not source
+watch_channels.json*
+
 # python
 __pycache__/
 *.pyc
