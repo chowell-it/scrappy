@@ -1,2 +1,6 @@
 discord.py>=2.4
 yt-dlp>=2024.0
+# Lets yt-dlp impersonate a real browser's TLS fingerprint - several sites
+# (TikTok especially) increasingly wall off requests that don't look like a
+# real browser, independent of any login/cookies.
+curl_cffi>=0.13,<0.14

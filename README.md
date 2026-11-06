@@ -192,6 +192,10 @@ per site and append the files together.
   server has more upload headroom.
 - yt-dlp breaks when sites change. `AUTO_UPDATE=1` (default) refreshes it on
   each startup; otherwise `pip install -U yt-dlp` periodically.
+- TikTok in particular walls off requests that don't look like a real
+  browser — no login needed, `curl_cffi` (in `requirements.txt`) lets yt-dlp
+  impersonate one. If a TikTok link fails with "Unexpected response from
+  webpage request" and `curl_cffi` isn't installed, that's almost always why.
 - `/scrape format:image` pulls whatever image/thumbnail URLs yt-dlp surfaces
   for the post (or a direct image link as-is). It's not a full gallery
   scraper — multi-photo carousels on some sites may only yield one image.
