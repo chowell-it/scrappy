@@ -151,7 +151,14 @@ YouTube age-gated videos, private/login-walled Instagram & TikTok posts, and
 the "confirm you're not a bot" wall (common on datacenter/VPS IPs) all need a
 logged-in session. Drop a `cookies.txt` next to `bot.py` and yt-dlp uses it
 automatically — no code change. Without it, the bot replies explaining the link
-is blocked.
+is blocked for those sites.
+
+**Twitter/X is a special case:** instead of an explicit "log in" error, an
+unauthenticated (no cookies) request to X's API often just comes back with
+the media missing entirely, which looks to the bot like the tweet has no
+video/gif at all — reported as "couldn't find a video/gif at that link"
+rather than the age/login message above. If that happens on a tweet that
+clearly has one, this is almost always why; add X cookies below and retry.
 
 1. On your PC, install the browser extension **"Get cookies.txt LOCALLY"**
    (Chrome/Firefox).
@@ -166,7 +173,9 @@ is blocked.
 
 `cookies.txt` is **gitignored** — it's a credential, never commit it. Cookies
 expire every few weeks; re-export when videos start failing again. One file
-covers YouTube, Instagram, and TikTok.
+can cover every site at once — log into each site (YouTube, Instagram,
+TikTok, X, ...) in the same browser before exporting, or export separately
+per site and append the files together.
 
 ## Notes
 
