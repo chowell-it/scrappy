@@ -11,6 +11,7 @@ scraping (video/image/gif) and per-server channel configuration.
 
 import asyncio
 import json
+import math
 import os
 import re
 import shutil
@@ -448,6 +449,70 @@ def _fetch_bytes(url: str, timeout: int = 30) -> bytes:
         return resp.read()
 
 
+# Last-resort Twitter/X fallback, bypassing yt-dlp entirely: the public embed
+# widget (used to render tweets on other sites) pulls from a separate,
+# unauthenticated JSON API that has been observed to return complete
+# video_info for animated_gif media yt-dlp's GraphQL-based extraction misses.
+# ponytail: this reimplements the embed widget's tweet-id -> token formula,
+# which Twitter/X controls and could change or shut off without notice -
+# treat it as a bonus path, never the only way something works.
+_B36_DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+
+def _float_to_base36(x: float, frac_digits: int = 20) -> str:
+    """Mimics JS's (positive float).toString(36)."""
+    int_part = int(x)
+    frac = x - int_part
+    if int_part == 0:
+        int_str = "0"
+    else:
+        digits = []
+        n = int_part
+        while n:
+            digits.append(_B36_DIGITS[n % 36])
+            n //= 36
+        int_str = "".join(reversed(digits))
+    frac_str = []
+    f = frac
+    for _ in range(frac_digits):
+        f *= 36
+        d = int(f)
+        frac_str.append(_B36_DIGITS[d])
+        f -= d
+        if f <= 1e-12:
+            break
+    return int_str + ("." + "".join(frac_str) if frac_str else "")
+
+
+def _twitter_syndication_token(tweet_id: str) -> str:
+    n = (int(tweet_id) / 1e15) * math.pi
+    return re.sub(r"(0+|\.)", "", _float_to_base36(n))
+
+
+_TWEET_ID_RE = re.compile(r"/status(?:es)?/(\d+)")
+
+
+def fetch_twitter_gif(url: str) -> str | None:
+    """Best mp4 variant for a tweet's animated_gif/video media via the public
+    syndication API, or None if the url isn't a tweet or it has none."""
+    m = _TWEET_ID_RE.search(urlsplit(url).path)
+    if not m:
+        return None
+    tweet_id = m.group(1)
+    token = _twitter_syndication_token(tweet_id)
+    api_url = (f"https://cdn.syndication.twimg.com/tweet-result"
+               f"?id={tweet_id}&token={token}&lang=en")
+    data = json.loads(_fetch_bytes(api_url).decode("utf-8"))
+    best = None
+    for media in data.get("mediaDetails") or []:
+        for variant in (media.get("video_info") or {}).get("variants") or []:
+            if variant.get("content_type") != "video/mp4" or not variant.get("url"):
+                continue
+            if best is None or (variant.get("bitrate") or 0) > best[0]:
+                best = (variant.get("bitrate") or 0, variant["url"])
+    return best[1] if best else None
+
+
 def fetch_images(url: str, workdir: str, want_gif: bool) -> list[str]:
     """Grab image(s)/gif(s) referenced by url. Returns saved file paths."""
     candidates: list[str] = []
@@ -693,6 +758,23 @@ async def scrape_cmd(interaction: discord.Interaction, url: str,
                     await interaction.followup.send(msg)
                     return
                 print(f"[/scrape gif-fallback] probe failed for {url}: {e}")
+                # yt-dlp's GraphQL-based extraction has a known gap for some
+                # animated_gif tweets (missing video_info entirely, even
+                # though the public page clearly shows motion) — try the
+                # embed widget's own API before giving up on there being a
+                # video at all.
+                if _is_twitter_host((urlsplit(url).hostname or "").lower()):
+                    try:
+                        mp4_url = await asyncio.to_thread(fetch_twitter_gif, url)
+                    except Exception as e2:  # noqa: BLE001
+                        print(f"[/scrape gif-fallback] syndication lookup failed for {url}: {e2}")
+                        mp4_url = None
+                    if mp4_url:
+                        dst = os.path.join(workdir, "syndication.mp4")
+                        await asyncio.to_thread(
+                            lambda: open(dst, "wb").write(_fetch_bytes(mp4_url)))
+                        await interaction.followup.send(file=discord.File(dst))
+                        return
                 # Truly no video/gif data at all (e.g. the post is just a
                 # static photo despite looking animated in the site's UI) —
                 # last resort: send the image instead of failing outright.
