@@ -57,11 +57,15 @@ to once/day), so a VPS restart picks up the fix automatically.
 - `/help` — what the bot does, supported sites, current limits.
 - `/scrape url format:` — grab a video (default), image, or gif from a
   supported link on demand, regardless of the dedupe/auto-watch flow.
-- `/watch add|remove|list` — configure which channels scrappy watches in this
-  server (needs **Manage Channels**). Settings persist in
-  `watch_channels.json` next to `bot.py` and survive restarts. A server with
-  no configuration falls back to the global `WATCH_CHANNELS` env var, or "every
-  channel" if that's blank too.
+- `/watch add|remove|list` — configure which channels scrappy auto-watches
+  (posted links trigger a download) in this server (needs **Manage
+  Channels**). Settings persist in `watch_channels.json` next to `bot.py`
+  and survive restarts. **Nothing is watched by default** — a server with no
+  configuration falls back to the global `WATCH_CHANNELS` env var, or watches
+  no channels at all if that's blank too; run `/watch add` to turn it on
+  somewhere. `/scrape` isn't affected by this — it works in any channel
+  regardless of `/watch` config, since it's an explicit on-demand pull, not
+  passive watching.
 
 Slash commands need the `applications.commands` OAuth2 scope (see invite URL
 below) and sync globally on startup, which can take up to an hour to appear
@@ -96,12 +100,13 @@ python bot.py
 4. **OAuth2 → URL Generator**: scopes `bot` and `applications.commands`,
    bot permissions *Send Messages*, *Read Message History*, *Attach Files*.
    Open the URL to invite the bot to your server.
-5. To restrict it to certain channels: once it's in your server, run
-   `/watch add #channel` for each channel it should watch (needs Manage
-   Channels). Or, for a single global default across every server, enable
-   Developer Mode (**Settings → Advanced**), right-click a channel → **Copy
-   Channel ID**, put the IDs (comma-separated) in `WATCH_CHANNELS`. Blank =
-   all channels.
+5. **Nothing is auto-watched until you turn it on.** Once the bot's in your
+   server, run `/watch add #channel` for each channel it should watch (needs
+   Manage Channels) — links posted elsewhere are ignored. Or, for a single
+   global default across every server, enable Developer Mode (**Settings →
+   Advanced**), right-click a channel → **Copy Channel ID**, put the IDs
+   (comma-separated) in `WATCH_CHANNELS`. `/scrape` works everywhere
+   regardless, since you're invoking it on purpose.
 
 ## Free / cheap VPS hosting
 
@@ -174,7 +179,10 @@ covers YouTube, Instagram, and TikTok.
   server has more upload headroom.
 - yt-dlp breaks when sites change. `AUTO_UPDATE=1` (default) refreshes it on
   each startup; otherwise `pip install -U yt-dlp` periodically.
-- `/scrape format:image` and `format:gif` pull whatever image/thumbnail URLs
-  yt-dlp surfaces for the post (or a direct image/gif link as-is). It's not a
-  full gallery scraper — multi-photo carousels on some sites may only yield
-  one image.
+- `/scrape format:image` pulls whatever image/thumbnail URLs yt-dlp surfaces
+  for the post (or a direct image link as-is). It's not a full gallery
+  scraper — multi-photo carousels on some sites may only yield one image.
+- `/scrape format:gif` grabs a direct `.gif` file if there is one; otherwise
+  (the common case on Twitter/Reddit/Tumblr, where a "gif" is actually
+  encoded as a short looping mp4) it falls back to downloading it as video,
+  which Discord displays the same way.

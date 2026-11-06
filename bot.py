@@ -36,8 +36,9 @@ if os.path.exists(".env"):
             os.environ.setdefault(k.strip(), v.strip())
 
 TOKEN = os.environ["DISCORD_TOKEN"]
-# Comma-separated channel IDs to watch, legacy/global fallback used when a
-# guild hasn't configured its own list with /watch. Empty = every channel.
+# Comma-separated channel IDs to watch, global fallback used when a guild
+# hasn't configured its own list with /watch. Empty = watch nothing until
+# /watch add is run (deny by default, not every channel).
 WATCH_CHANNELS = {
     int(c) for c in os.environ.get("WATCH_CHANNELS", "").replace(" ", "").split(",") if c
 }
@@ -210,7 +211,12 @@ def channel_allowed(guild_id: Optional[int], channel_id: int) -> bool:
     configured = _watch_config.get(str(guild_id))
     if configured:
         return channel_id in configured
-    return not WATCH_CHANNELS or channel_id in WATCH_CHANNELS  # legacy env fallback
+    if WATCH_CHANNELS:  # legacy global env fallback
+        return channel_id in WATCH_CHANNELS
+    # Deny by default: a server that hasn't run /watch add (and has no
+    # WATCH_CHANNELS set) gets no auto-watching anywhere, rather than every
+    # channel the bot can see.
+    return False
 
 
 intents = discord.Intents.default()
@@ -598,11 +604,9 @@ async def help_cmd(interaction: discord.Interaction):
 ])
 async def scrape_cmd(interaction: discord.Interaction, url: str,
                       format: Optional[app_commands.Choice[str]] = None):
-    if interaction.guild and not channel_allowed(interaction.guild.id, interaction.channel_id):
-        await interaction.response.send_message(
-            "❌ scrappy isn't configured to work in this channel.", ephemeral=True)
-        return
-
+    # No channel_allowed() gate here on purpose: /watch controls passive
+    # auto-watching of posted links, not this explicit on-demand command —
+    # it works in any channel the bot can see and post in.
     url = strip_tracking(url.strip())
     fmt = format.value if format else "video"
     # A direct image/gif file (e.g. a CDN link) is identified by extension, not
@@ -635,12 +639,39 @@ async def scrape_cmd(interaction: discord.Interaction, url: str,
                 await interaction.followup.send(f"❌ Couldn't get **{title}** under {MAX_MB:g} MB.")
                 return
             await interaction.followup.send(content=f"**{title}**", file=discord.File(final))
-        else:
-            paths = await asyncio.to_thread(fetch_images, url, workdir, fmt == "gif")
+        elif fmt == "image":
+            paths = await asyncio.to_thread(fetch_images, url, workdir, want_gif=False)
             if not paths:
-                await interaction.followup.send(f"❌ Couldn't find any {fmt}s at that link.")
+                await interaction.followup.send("❌ Couldn't find any images at that link.")
                 return
             await interaction.followup.send(files=[discord.File(p) for p in paths])
+        else:  # gif
+            paths = await asyncio.to_thread(fetch_images, url, workdir, want_gif=True)
+            if paths:
+                await interaction.followup.send(files=[discord.File(p) for p in paths])
+                return
+            # No literal .gif file/thumbnail found — on most sites (Twitter,
+            # Reddit, Tumblr...) what displays as a "gif" is actually encoded
+            # as a short looping mp4 with no .gif anywhere. Fall back to
+            # grabbing it as video; Discord renders a short looping mp4 the
+            # same way it renders a gif.
+            try:
+                info = await asyncio.to_thread(probe, url)
+            except yt_dlp.utils.DownloadError as e:
+                msg = classify_download_error(e, url) or "❌ Couldn't find a gif at that link."
+                await interaction.followup.send(msg)
+                return
+            duration = info.get("duration") or 0
+            if duration and duration > MAX_MINUTES * 60:
+                await interaction.followup.send(
+                    f"❌ That's {duration / 60:.0f} min — not really a gif, and over the "
+                    f"{MAX_MINUTES:g} min limit.")
+                return
+            final = await grab_video(url, workdir)
+            if not final:
+                await interaction.followup.send(f"❌ Couldn't get that under {MAX_MB:g} MB.")
+                return
+            await interaction.followup.send(file=discord.File(final))
     except yt_dlp.utils.DownloadError as e:
         msg = classify_download_error(e, url) or f"❌ Couldn't fetch that: {e}"
         await interaction.followup.send(msg)
@@ -698,7 +729,8 @@ async def watch_list(interaction: discord.Interaction):
             "`WATCH_CHANNELS` env setting.", ephemeral=True)
     else:
         await interaction.response.send_message(
-            "No channels configured — watching every channel I can see.", ephemeral=True)
+            "No channels configured — not auto-watching anywhere in this server. "
+            "Run `/watch add` on a channel to turn it on there.", ephemeral=True)
 
 
 tree.add_command(watch_group)
