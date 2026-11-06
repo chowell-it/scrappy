@@ -153,12 +153,16 @@ logged-in session. Drop a `cookies.txt` next to `bot.py` and yt-dlp uses it
 automatically — no code change. Without it, the bot replies explaining the link
 is blocked for those sites.
 
-**Twitter/X is a special case:** instead of an explicit "log in" error, an
-unauthenticated (no cookies) request to X's API often just comes back with
-the media missing entirely, which looks to the bot like the tweet has no
-video/gif at all — reported as "couldn't find a video/gif at that link"
-rather than the age/login message above. If that happens on a tweet that
-clearly has one, this is almost always why; add X cookies below and retry.
+**Twitter/X is a special case:** instead of an explicit "log in" error, X's
+own UI sometimes labels a post as a GIF/video when the underlying media is
+actually just a static photo with no motion data at all (confirmed by
+`/scrape format:image` succeeding on the same link while `format:video`/
+`format:gif` both report "couldn't find" one) — in that case there's
+nothing more to get, cookies or not. It's also possible for an
+unauthenticated request to come back with real media missing that cookies
+*would* fix; if `format:image` also fails on a link that clearly has visible
+content, that's the more likely explanation, so add X cookies below and
+retry.
 
 1. On your PC, install the browser extension **"Get cookies.txt LOCALLY"**
    (Chrome/Firefox).
@@ -191,7 +195,9 @@ per site and append the files together.
 - `/scrape format:image` pulls whatever image/thumbnail URLs yt-dlp surfaces
   for the post (or a direct image link as-is). It's not a full gallery
   scraper — multi-photo carousels on some sites may only yield one image.
-- `/scrape format:gif` grabs a direct `.gif` file if there is one; otherwise
-  (the common case on Twitter/Reddit/Tumblr, where a "gif" is actually
-  encoded as a short looping mp4) it falls back to downloading it as video,
-  which Discord displays the same way.
+- `/scrape format:gif` tries, in order: a direct `.gif` file; a short looping
+  mp4 (the common case on Twitter/Reddit/Tumblr, where a "gif" is actually
+  encoded as video with no `.gif` anywhere — Discord displays it the same
+  way); and finally, if there's truly no video/animation data at all (some
+  posts just look animated in the site's own UI but are static photos), the
+  plain image, with a note that it isn't actually moving.

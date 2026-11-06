@@ -689,10 +689,20 @@ async def scrape_cmd(interaction: discord.Interaction, url: str,
                 info = await asyncio.to_thread(probe, url)
             except yt_dlp.utils.DownloadError as e:
                 msg = classify_download_error(e, url)
-                if not msg:
-                    print(f"[/scrape gif-fallback] probe failed for {url}: {e}")
-                    msg = "❌ Couldn't find a gif at that link."
-                await interaction.followup.send(msg)
+                if msg:
+                    await interaction.followup.send(msg)
+                    return
+                print(f"[/scrape gif-fallback] probe failed for {url}: {e}")
+                # Truly no video/gif data at all (e.g. the post is just a
+                # static photo despite looking animated in the site's UI) —
+                # last resort: send the image instead of failing outright.
+                img_paths = await asyncio.to_thread(fetch_images, url, workdir, want_gif=False)
+                if not img_paths:
+                    await interaction.followup.send("❌ Couldn't find a gif at that link.")
+                    return
+                await interaction.followup.send(
+                    content="-# Not actually animated — sending the image instead.",
+                    files=[discord.File(p) for p in img_paths])
                 return
             duration = info.get("duration") or 0
             if duration and duration > MAX_MINUTES * 60:
