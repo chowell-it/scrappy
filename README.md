@@ -204,12 +204,14 @@ per site and append the files together.
   scraper — multi-photo carousels on some sites may only yield one image. If
   the site's own extractor refuses the post outright (some, like Instagram
   and TikTok, are video-first and error out on an image-only post rather
-  than returning its metadata), it falls back to reading the page's
-  `og:image` meta tag directly — the same data Discord's own link preview
-  uses. That's a deliberately downscaled/cropped preview image, not the
-  original full-resolution photo — expect noticeably lower quality from this
-  fallback path specifically. Getting the real original would need a logged-
-  in session, which this bot intentionally doesn't use.
+  than returning its metadata), it falls back to other sources without any
+  login: on Instagram specifically, the public "Embed Post" iframe page
+  (what third-party sites use to embed a post), which serves the real
+  full-resolution image; everywhere else, the page's `og:image` meta tag —
+  the same data Discord's own link preview uses, but a deliberately
+  downscaled/cropped preview card rather than the original photo. Both of
+  these scrape an undocumented page the site controls and could change or
+  lock down without notice.
 - `/scrape format:gif` tries, in order: a direct `.gif` file, sent as-is; a
   short looping mp4 (the common case on Twitter/Reddit/Tumblr, where a "gif"
   is actually encoded as video with no `.gif` anywhere) — **converted to an

@@ -143,6 +143,10 @@ def _is_twitter_host(host: str) -> bool:
     return any(host == d or host.endswith("." + d) for d in _TWITTER_HOSTS)
 
 
+def _is_instagram_host(host: str) -> bool:
+    return host == "instagram.com" or host.endswith(".instagram.com")
+
+
 def strip_tracking(url: str) -> str:
     parts = urlsplit(url)
     kept = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
@@ -605,6 +609,33 @@ def fetch_og_image(url: str) -> str | None:
     return None
 
 
+# Instagram's own public "Embed Post" iframe widget (what third-party sites
+# use to embed a post) serves the real, full-resolution image with no login
+# needed — unlike og:image above, which is a deliberately downscaled preview
+# card. ponytail: scrapes an undocumented page Instagram controls and could
+# change or lock down without notice; fetch_images() falls back to og:image
+# if this comes up empty, so losing it degrades gracefully rather than
+# breaking anything.
+_IMG_TAG_RE = re.compile(r"<img\s[^>]*>", re.I)
+_EMBED_IMG_CLASS_RE = re.compile(r'class=["\'][^"\']*EmbeddedMediaImage[^"\']*["\']', re.I)
+_SRC_RE = re.compile(r'src=["\']([^"\']+)["\']', re.I)
+
+
+def fetch_instagram_embed_image(url: str) -> str | None:
+    embed_url = url.split("?")[0].rstrip("/") + "/embed/captioned/"
+    try:
+        page = _fetch_bytes(embed_url).decode("utf-8", errors="ignore")
+    except Exception as e:  # noqa: BLE001
+        print(f"[fetch_instagram_embed_image] couldn't fetch {embed_url}: {e}")
+        return None
+    for tag in _IMG_TAG_RE.findall(page):
+        if _EMBED_IMG_CLASS_RE.search(tag):
+            m = _SRC_RE.search(tag)
+            if m:
+                return html.unescape(m.group(1))
+    return None
+
+
 def fetch_images(url: str, workdir: str, want_gif: bool) -> list[str]:
     """Grab image(s)/gif(s) referenced by url. Returns saved file paths."""
     candidates: list[str] = []
@@ -618,10 +649,17 @@ def fetch_images(url: str, workdir: str, want_gif: bool) -> list[str]:
                                    **cookie_opt()}) as ydl:
                 info = ydl.extract_info(url, download=False)
         except yt_dlp.utils.DownloadError as e:
-            print(f"[fetch_images] extractor refused {url}, trying og:image: {e}")
-            og = fetch_og_image(url)
-            if og:
-                candidates.append(og)
+            print(f"[fetch_images] extractor refused {url}: {e}")
+            best = None
+            if _is_instagram_host((urlsplit(url).hostname or "").lower()):
+                try:
+                    best = fetch_instagram_embed_image(url)
+                except Exception as e2:  # noqa: BLE001
+                    print(f"[fetch_images] instagram embed lookup failed for {url}: {e2}")
+            if not best:
+                best = fetch_og_image(url)
+            if best:
+                candidates.append(best)
         for entry in (info.get("entries") or [info]) if info else []:
             thumbs = entry.get("thumbnails") or []
             if thumbs:
