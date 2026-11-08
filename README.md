@@ -206,7 +206,10 @@ per site and append the files together.
   and TikTok, are video-first and error out on an image-only post rather
   than returning its metadata), it falls back to reading the page's
   `og:image` meta tag directly — the same data Discord's own link preview
-  uses.
+  uses. That's a deliberately downscaled/cropped preview image, not the
+  original full-resolution photo — expect noticeably lower quality from this
+  fallback path specifically. Getting the real original would need a logged-
+  in session, which this bot intentionally doesn't use.
 - `/scrape format:gif` tries, in order: a direct `.gif` file, sent as-is; a
   short looping mp4 (the common case on Twitter/Reddit/Tumblr, where a "gif"
   is actually encoded as video with no `.gif` anywhere) — **converted to an
