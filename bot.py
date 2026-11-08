@@ -10,6 +10,7 @@ scraping (video/image/gif) and per-server channel configuration.
 """
 
 import asyncio
+import html
 import json
 import math
 import os
@@ -574,17 +575,54 @@ def fetch_twitter_gif(url: str) -> str | None:
     return best[1] if best else None
 
 
+# Some sites' dedicated extractors (Instagram, TikTok, ...) are video-first
+# and flat-out raise an error for an image-only post instead of returning
+# its image metadata — yt-dlp's generic extractor does too, once it finds no
+# video-like embed on the page, even though it already parsed the thumbnail
+# by then (see yt_dlp/extractor/generic.py: raise UnsupportedError(url) after
+# populating info_dict['thumbnail']). Reading the og:image/twitter:image meta
+# tag ourselves sidesteps that — it's the same data Discord's own link
+# preview uses, so it's reliably there for a real post.
+# content= can come before or after property=/name= in the wild, so match
+# each whole <meta> tag first and check/extract within it rather than
+# assuming an attribute order.
+_META_TAG_RE = re.compile(r"<meta\s[^>]*>", re.I)
+_OG_PROP_RE = re.compile(r'(?:property|name)=["\'](?:og:image(?::secure_url)?|twitter:image)["\']', re.I)
+_CONTENT_RE = re.compile(r'content=["\']([^"\']+)["\']', re.I)
+
+
+def fetch_og_image(url: str) -> str | None:
+    try:
+        page = _fetch_bytes(url).decode("utf-8", errors="ignore")
+    except Exception as e:  # noqa: BLE001
+        print(f"[fetch_og_image] couldn't fetch {url}: {e}")
+        return None
+    for tag in _META_TAG_RE.findall(page):
+        if _OG_PROP_RE.search(tag):
+            m = _CONTENT_RE.search(tag)
+            if m:
+                return html.unescape(m.group(1))
+    return None
+
+
 def fetch_images(url: str, workdir: str, want_gif: bool) -> list[str]:
     """Grab image(s)/gif(s) referenced by url. Returns saved file paths."""
     candidates: list[str] = []
     if _IMG_EXT_RE.search(url):
         candidates = [url]
     else:
-        with yt_dlp.YoutubeDL({"quiet": True, "socket_timeout": 30,
-                               "allowed_extractors": ["default", "-generic"],
-                               **cookie_opt()}) as ydl:
-            info = ydl.extract_info(url, download=False)
-        for entry in info.get("entries") or [info]:
+        info = None
+        try:
+            with yt_dlp.YoutubeDL({"quiet": True, "socket_timeout": 30,
+                                   "allowed_extractors": ["default", "-generic"],
+                                   **cookie_opt()}) as ydl:
+                info = ydl.extract_info(url, download=False)
+        except yt_dlp.utils.DownloadError as e:
+            print(f"[fetch_images] extractor refused {url}, trying og:image: {e}")
+            og = fetch_og_image(url)
+            if og:
+                candidates.append(og)
+        for entry in (info.get("entries") or [info]) if info else []:
             thumbs = entry.get("thumbnails") or []
             if thumbs:
                 candidates.append(thumbs[-1]["url"])  # last = highest-res

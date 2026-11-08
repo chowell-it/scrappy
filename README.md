@@ -201,7 +201,12 @@ per site and append the files together.
   webpage request" and `curl_cffi` isn't installed, that's almost always why.
 - `/scrape format:image` pulls whatever image/thumbnail URLs yt-dlp surfaces
   for the post (or a direct image link as-is). It's not a full gallery
-  scraper — multi-photo carousels on some sites may only yield one image.
+  scraper — multi-photo carousels on some sites may only yield one image. If
+  the site's own extractor refuses the post outright (some, like Instagram
+  and TikTok, are video-first and error out on an image-only post rather
+  than returning its metadata), it falls back to reading the page's
+  `og:image` meta tag directly — the same data Discord's own link preview
+  uses.
 - `/scrape format:gif` tries, in order: a direct `.gif` file, sent as-is; a
   short looping mp4 (the common case on Twitter/Reddit/Tumblr, where a "gif"
   is actually encoded as video with no `.gif` anywhere) — **converted to an
