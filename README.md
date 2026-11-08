@@ -211,3 +211,6 @@ per site and append the files together.
   and finally, if there's truly no video/animation data at all (some posts
   just look animated in the site's own UI but are static photos), the plain
   image, with a note that it isn't actually moving.
+- `/scrape format:video` (the default) falls back to the plain image the
+  same way if the link turns out to be a photo post rather than a video —
+  no need to re-run it with `format:image` by hand.

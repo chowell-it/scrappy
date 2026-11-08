@@ -803,6 +803,18 @@ async def scrape_cmd(interaction: discord.Interaction, url: str,
         except discord.HTTPException:
             pass
 
+    async def try_image_fallback(note: str) -> bool:
+        """Last resort when a video/gif turns out not to exist (e.g. yt-dlp's
+        lightweight probe passes but the real download hits "no video in
+        this post", or it never had any to begin with) — grab the post's
+        image instead rather than just failing. Returns whether it sent one."""
+        img_paths = await asyncio.to_thread(fetch_images, url, workdir, want_gif=False)
+        if not img_paths:
+            return False
+        await interaction.edit_original_response(
+            content=f"-# {note}\n{link}", attachments=[discord.File(p) for p in img_paths])
+        return True
+
     await set_status("🔎 Checking link…")
     loop = asyncio.get_running_loop()
     workdir = tempfile.mkdtemp(prefix="scrappy_")
@@ -814,6 +826,9 @@ async def scrape_cmd(interaction: discord.Interaction, url: str,
                 msg = classify_download_error(e, url)
                 if not msg:
                     print(f"[/scrape video] probe failed for {url}: {e}")
+                    await set_status("🖼️ No video found — trying the image instead…")
+                    if await try_image_fallback("Not a video — sending the image instead."):
+                        return
                     msg = "❌ Couldn't find a video at that link."
                 await set_status(msg)
                 return
@@ -829,7 +844,18 @@ async def scrape_cmd(interaction: discord.Interaction, url: str,
 
             hook = make_progress_hook(loop, set_status, f"📥 Downloading **{title}**…")
             await set_status(f"📥 Downloading **{title}**… {progress_bar(0)}")
-            final = await grab_video(url, workdir, mark_processing, hook)
+            try:
+                final = await grab_video(url, workdir, mark_processing, hook)
+            except yt_dlp.utils.DownloadError as e:
+                msg = classify_download_error(e, url)
+                if not msg:
+                    print(f"[/scrape video] download failed for {url}: {e}")
+                    await set_status("🖼️ No video found — trying the image instead…")
+                    if await try_image_fallback("Not a video — sending the image instead."):
+                        return
+                    msg = f"❌ Couldn't download **{title}**: {e}"
+                await set_status(msg)
+                return
             if not final:
                 await set_status(f"❌ Couldn't get **{title}** under {MAX_MB:g} MB.")
                 return
@@ -888,13 +914,9 @@ async def scrape_cmd(interaction: discord.Interaction, url: str,
                 # static photo despite looking animated in the site's UI) —
                 # last resort: send the image instead of failing outright.
                 await set_status("🖼️ No gif/video data — trying the image instead…")
-                img_paths = await asyncio.to_thread(fetch_images, url, workdir, want_gif=False)
-                if not img_paths:
-                    await set_status("❌ Couldn't find a gif at that link.")
+                if await try_image_fallback("Not actually animated — sending the image instead."):
                     return
-                await interaction.edit_original_response(
-                    content=f"-# Not actually animated — sending the image instead.\n{link}",
-                    attachments=[discord.File(p) for p in img_paths])
+                await set_status("❌ Couldn't find a gif at that link.")
                 return
             duration = info.get("duration") or 0
             if duration and duration > MAX_MINUTES * 60:
@@ -907,7 +929,18 @@ async def scrape_cmd(interaction: discord.Interaction, url: str,
 
             hook = make_progress_hook(loop, set_status, "📥 Downloading gif source…")
             await set_status(f"📥 Downloading gif source… {progress_bar(0)}")
-            final = await grab_video(url, workdir, mark_processing, hook)
+            try:
+                final = await grab_video(url, workdir, mark_processing, hook)
+            except yt_dlp.utils.DownloadError as e:
+                msg = classify_download_error(e, url)
+                if not msg:
+                    print(f"[/scrape gif-fallback] download failed for {url}: {e}")
+                    await set_status("🖼️ No gif/video data — trying the image instead…")
+                    if await try_image_fallback("Not actually animated — sending the image instead."):
+                        return
+                    msg = f"❌ Couldn't fetch that gif: {e}"
+                await set_status(msg)
+                return
             if not final:
                 await set_status(f"❌ Couldn't get that under {MAX_MB:g} MB.")
                 return
